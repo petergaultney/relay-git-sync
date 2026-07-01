@@ -2,11 +2,9 @@
 
 import logging
 import traceback
-import requests
 import json
 from typing import Optional, Dict, Any
-from urllib.parse import urlparse, urlunparse
-from y_sweet_sdk import DocumentManager
+from relay_sdk import RelayClient as RelaySDKClient
 from pycrdt import Doc, Text, Map
 from s3rn import S3RNType, S3RN, S3RemoteFolder, S3RemoteDocument, S3RemoteFile, S3RemoteCanvas
 from models import ResourceType, get_s3rn_resource_category
@@ -15,47 +13,33 @@ logger = logging.getLogger(__name__)
 
 
 class RelayClient:
-    """Wrapper around Y-Sweet DocumentManager with authentication handling"""
+    """Application wrapper around the Relay SDK with authentication handling"""
 
     def __init__(self, relay_server_url: str, relay_server_api_key: Optional[str] = None):
         self.relay_server_url = relay_server_url
         self.relay_server_api_key = relay_server_api_key
         self.dm = self._init_document_manager()
 
-    def _init_document_manager(self) -> DocumentManager:
-        """Initialize DocumentManager with configurable server and authentication"""
+    def _init_document_manager(self) -> RelaySDKClient:
+        """Initialize the SDK client with configurable server and authentication"""
         if not self.relay_server_url:
             raise ValueError("Relay server URL is required")
 
         if self.relay_server_api_key:
-            # Construct connection string with API key as username
-            parsed = urlparse(self.relay_server_url)
-            # Replace scheme and add API key as username
-            scheme = "ys" if parsed.scheme in ["http", "https"] else parsed.scheme
-            connection_string = urlunparse(
-                (
-                    scheme,
-                    f"{self.relay_server_api_key}@{parsed.netloc}",
-                    parsed.path,
-                    parsed.params,
-                    parsed.query,
-                    parsed.fragment,
-                )
-            )
             logger.debug(f"Connecting to relay server with API key authentication")
-            return DocumentManager(connection_string)
+            return RelaySDKClient(self.relay_server_url, token=self.relay_server_api_key)
         else:
             logger.debug(f"Connecting to relay server: {self.relay_server_url}")
-            return DocumentManager(self.relay_server_url)
+            return RelaySDKClient(self.relay_server_url)
 
     def get_doc_as_update(self, doc_id: str) -> bytes:
-        """Get document update from Y-Sweet server"""
+        """Get document update from the Relay server"""
         return self.dm.get_doc_as_update(doc_id)
 
     def fetch_document_content(self, resource: S3RNType) -> Optional[str]:
         """Fetch document content from remote using S3RN resource"""
         try:
-            # Construct compound ID for Y-Sweet at the boundary
+            # Construct compound ID for Relay at the boundary
             compound_doc_id = S3RN.get_compound_document_id(resource)
             resource_name = f"{type(resource).__name__}({S3RN.encode(resource)})"
             logger.debug(f"📄 Fetching document: {resource_name}")
@@ -81,7 +65,7 @@ class RelayClient:
     def fetch_canvas_content(self, resource: S3RemoteCanvas) -> Optional[str]:
         """Fetch canvas content from remote and export as JSON string"""
         try:
-            # Construct compound ID for Y-Sweet at the boundary
+            # Construct compound ID for Relay at the boundary
             compound_doc_id = S3RN.get_compound_document_id(resource)
             resource_name = f"S3RemoteCanvas({S3RN.encode(resource)})"
             logger.debug(f"🎨 Fetching canvas: {resource_name}")
@@ -161,27 +145,10 @@ class RelayClient:
             resource_name = f"S3RemoteFile({s3rn_encoded})"
             logger.debug(f"🗄️ Fetching S3 file: {resource_name}")
 
-            # Get download URL directly using server token
-            download_url = self._get_download_url(resource, file_hash)
-            if not download_url:
-                return None
-
-            # Download file content from presigned URL (don't log full URL - contains signature)
-            logger.debug(f"🌐 S3 FILE DOWNLOAD REQUEST")
-
-            download_response = requests.get(download_url, timeout=30)
-
-            logger.debug(
-                f"✅ S3 FILE DOWNLOAD RESPONSE: {download_response.status_code} ({len(download_response.content)} bytes)"
-            )
-
-            if download_response.status_code != 200:
-                logger.error(f"❌ S3 file download failed: {download_response.status_code}")
-
-            download_response.raise_for_status()
-
-            logger.debug(f"✅ Downloaded S3 file: {len(download_response.content)} bytes")
-            return download_response.content
+            compound_doc_id = S3RN.get_compound_document_id(resource)
+            content = self.dm.download_file(compound_doc_id, file_hash, timeout=30)
+            logger.debug(f"✅ Downloaded S3 file: {len(content)} bytes")
+            return content
 
         except Exception as e:
             logger.error(f"Error fetching S3 file {resource}: {e}")
@@ -191,50 +158,8 @@ class RelayClient:
     def _get_download_url(self, resource: S3RemoteFile, file_hash: str) -> Optional[str]:
         """Get presigned download URL using server token"""
         try:
-            # Extract document ID from resource for the API call
             compound_doc_id = S3RN.get_compound_document_id(resource)
-            s3rn_encoded = S3RN.encode(resource)
-
-            # Construct download-url endpoint from relay server URL using correct path
-            parsed = urlparse(self.relay_server_url)
-            if parsed.scheme == "ys":
-                # Convert ys:// to https:// for HTTP requests
-                download_url_endpoint = f"https://{parsed.netloc}/f/{compound_doc_id}/download-url"
-            else:
-                download_url_endpoint = f"{self.relay_server_url}/f/{compound_doc_id}/download-url"
-
-            # Add hash as query parameter
-            params = {"hash": file_hash}
-
-            headers = {}
-            if self.relay_server_api_key:
-                headers["Authorization"] = f"Bearer {self.relay_server_api_key}"
-
-            # Construct full URL with params for logging (no sensitive data)
-            full_url = f"{download_url_endpoint}?hash={file_hash}"
-            logger.debug(f"🌐 DOWNLOAD-URL REQUEST: GET {full_url}")
-
-            response = requests.get(
-                download_url_endpoint, params=params, headers=headers, timeout=10
-            )
-
-            logger.debug(f"✅ DOWNLOAD-URL RESPONSE: {response.status_code}")
-
-            if response.status_code == 404:
-                logger.error("❌ S3 file not found (404)")
-                return None
-
-            try:
-                response.raise_for_status()
-                response_data = response.json()
-
-                download_url = response_data.get("downloadUrl")
-                logger.debug(f"🔗 Got presigned URL")
-                return download_url
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"❌ DOWNLOAD-URL REQUEST FAILED: {response.status_code} {e}")
-                raise
+            return self.dm.get_file_download_url(compound_doc_id, file_hash)
 
         except Exception as e:
             logger.error(f"❌ Error getting download URL: {e}")
@@ -249,7 +174,7 @@ class RelayClient:
                    filemeta_dict if it's a folder, content_str if it's a text document
         """
         try:
-            # Construct compound ID for Y-Sweet at the boundary
+            # Construct compound ID for Relay at the boundary
             compound_doc_id = S3RN.get_compound_document_id(resource)
 
             # Get the document as an update
@@ -344,9 +269,9 @@ class RelayClient:
         return S3RemoteFolder(relay_id, folder_id)
 
     def get_doc_object(self, resource: S3RNType) -> Doc:
-        """Get Y.Doc object from Y-Sweet server - pure I/O operation"""
+        """Get Y.Doc object from the Relay server - pure I/O operation"""
         try:
-            # Construct compound ID for Y-Sweet at the boundary
+            # Construct compound ID for Relay at the boundary
             compound_doc_id = S3RN.get_compound_document_id(resource)
             resource_name = f"{type(resource).__name__}({S3RN.encode(resource)})"
             logger.debug(f"📄 Fetching raw document: {resource_name}")

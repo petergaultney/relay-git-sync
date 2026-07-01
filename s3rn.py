@@ -328,11 +328,11 @@ class S3RN:
 
     @staticmethod
     def get_compound_document_id(resource: S3RNType) -> str:
-        """Get compound document ID for Y-Sweet communication
+        """Get compound document ID for Relay communication
 
         WARNING: This method should ONLY be called at IO boundaries (RelayClient, WebhookHandler).
         Internal components should use individual resource IDs to maintain separation of concerns.
-        Compound IDs are a Y-Sweet protocol detail that should not leak into business logic.
+        Compound IDs are a Relay protocol detail that should not leak into business logic.
         """
         if isinstance(resource, S3RemoteFolder):
             return f"{resource.relay_id}-{resource.folder_id}"

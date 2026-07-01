@@ -1,5 +1,8 @@
 *.pyc
-y_sweet_sdk/
+relay_sdk/*
+!relay_sdk/
+!relay_sdk/*.py
+!relay_sdk/LICENSE
 git_sync_key
 git_sync_key.pub
 .auth.env
