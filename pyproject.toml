@@ -11,12 +11,14 @@ dependencies = [
     "GitPython",
     "flask",
     "cryptography",
+    "cbor2>=5.6.5",
     "python-dateutil",
     "pyjwt",
     "svix",
     "starlette",
     "uvicorn",
     "pyyaml>=6.0.2",
+    "rich>=13.7.0",
     "tomli>=1.2.0;python_version<'3.11'",
 ]
 

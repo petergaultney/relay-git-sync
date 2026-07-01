@@ -9,22 +9,31 @@ import base64
 import jwt
 import datetime
 from typing import Optional
+import cbor2
 from relay_client import RelayClient
 from persistence import PersistenceManager, SSHKeyManager
 from sync_engine import SyncEngine
 from s3rn import S3RemoteFolder
-from git_config import GitConnectorConfig, GitConnector
+from git_config import (
+    GitConnectorConfig,
+    GitConnector,
+    resolve_relay_id,
+    resolve_relay_url,
+    resolve_webhook_url,
+)
+from relay_auth import (
+    generate_setup,
+    generate_webhook_secret,
+    inspect_token,
+    print_setup,
+    print_token_info,
+    setup_as_json,
+    token_info_as_json,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def generate_webhook_secret():
-    """Generate a secure webhook shared secret (not JWT-based)"""
-    secret_bytes = secrets.token_bytes(32)
-    secret_key = base64.urlsafe_b64encode(secret_bytes).decode("utf-8").rstrip("=")
-    return secret_key  # No prefix - just plain shared secret
 
 
 def generate_jwt_secret():
@@ -210,10 +219,73 @@ def api_token_create_command(args):
         return 1
 
 
+def setup_command(args):
+    """Generate Relay auth setup for Git Sync"""
+    try:
+        server_url = resolve_relay_url(
+            args.server_url,
+            data_dir=args.data_dir,
+            git_config_file=args.config,
+        )
+        if not server_url:
+            print(
+                "Error: Relay server URL is required. Set [relay].url in git_connectors.toml or pass --server-url."
+            )
+            return 1
+        relay_id = resolve_relay_id(
+            args.relay_id,
+            data_dir=args.data_dir,
+            git_config_file=args.config,
+        )
+        if not relay_id:
+            print("Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id.")
+            return 1
+
+        setup = generate_setup(
+            server_url=server_url.rstrip("/"),
+            relay_id=relay_id,
+            expires_days=args.expires_days,
+            webhook_url=resolve_webhook_url(
+                args.webhook_url,
+                data_dir=args.data_dir,
+                git_config_file=args.config,
+            ),
+        )
+
+        if args.json:
+            print(setup_as_json(setup))
+        else:
+            print_setup(setup)
+        return 0
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+
+def inspect_token_command(args):
+    """Inspect a Relay API key"""
+    token = args.token or os.getenv("RELAY_SERVER_API_KEY")
+    if not token:
+        print("Error: token is required unless RELAY_SERVER_API_KEY is set.")
+        return 1
+
+    try:
+        info = inspect_token(token)
+    except (ValueError, cbor2.CBORDecodeError) as e:
+        print(f"Error: {e}")
+        return 1
+
+    if args.json:
+        print(token_info_as_json(info))
+    else:
+        print_token_info(info)
+    return 0
+
+
 def git_connector_list_command(args):
     """Handle git connector list command"""
     try:
-        config_file = args.git_config_file or os.path.join(args.data_dir, "git_connectors.toml")
+        config_file = args.config or os.path.join(args.data_dir, "git_connectors.toml")
         git_config = GitConnectorConfig(config_file)
 
         if not git_config.connectors:
@@ -243,13 +315,21 @@ def git_connector_list_command(args):
 def git_connector_add_command(args):
     """Handle git connector add command"""
     try:
-        config_file = args.git_config_file or os.path.join(args.data_dir, "git_connectors.toml")
+        config_file = args.config or os.path.join(args.data_dir, "git_connectors.toml")
         git_config = GitConnectorConfig(config_file)
+        relay_id = resolve_relay_id(
+            args.relay_id,
+            data_dir=args.data_dir,
+            git_config_file=args.config,
+        )
+        if not relay_id:
+            print("Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id.")
+            return 1
 
         # Create new connector
         connector = GitConnector(
             shared_folder_id=args.folder_id,
-            relay_id=args.relay_id,
+            relay_id=relay_id,
             url=args.url,
             branch=args.branch,
             remote_name=args.remote_name,
@@ -271,6 +351,9 @@ def git_connector_add_command(args):
         print(f"Manually edit: {git_config.get_config_file_path()}")
 
         return 0
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
     except Exception as e:
         logger.error(f"Error adding git connector: {e}")
         return 1
@@ -279,25 +362,36 @@ def git_connector_add_command(args):
 def git_connector_remove_command(args):
     """Handle git connector remove command"""
     try:
-        config_file = args.git_config_file or os.path.join(args.data_dir, "git_connectors.toml")
+        config_file = args.config or os.path.join(args.data_dir, "git_connectors.toml")
         git_config = GitConnectorConfig(config_file)
+        relay_id = resolve_relay_id(
+            args.relay_id,
+            data_dir=args.data_dir,
+            git_config_file=args.config,
+        )
+        if not relay_id:
+            print("Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id.")
+            return 1
 
-        removed = git_config.remove_connector(args.relay_id, args.folder_id)
+        removed = git_config.remove_connector(relay_id, args.folder_id)
 
         if removed:
             print("Git connector removed successfully:")
-            print(f"  Relay ID: {args.relay_id}")
+            print(f"  Relay ID: {relay_id}")
             print(f"  Folder ID: {args.folder_id}")
             print()
             print(f"Note: Configuration is in memory only.")
             print(f"Manually edit: {git_config.get_config_file_path()}")
         else:
             print("Git connector not found:")
-            print(f"  Relay ID: {args.relay_id}")
+            print(f"  Relay ID: {relay_id}")
             print(f"  Folder ID: {args.folder_id}")
             return 1
 
         return 0
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
     except Exception as e:
         logger.error(f"Error removing git connector: {e}")
         return 1
@@ -306,7 +400,7 @@ def git_connector_remove_command(args):
 def git_connector_init_command(args):
     """Handle git connector init command"""
     try:
-        config_file = args.git_config_file or os.path.join(args.data_dir, "git_connectors.toml")
+        config_file = args.config or os.path.join(args.data_dir, "git_connectors.toml")
         git_config = GitConnectorConfig(config_file)
 
         created = git_config.create_example_config()
@@ -330,7 +424,7 @@ def git_connector_init_command(args):
 def git_connector_validate_command(args):
     """Handle git connector validate command"""
     try:
-        config_file = args.git_config_file or os.path.join(args.data_dir, "git_connectors.toml")
+        config_file = args.config or os.path.join(args.data_dir, "git_connectors.toml")
         git_config = GitConnectorConfig(config_file)
 
         errors = git_config.validate_config()
@@ -354,7 +448,7 @@ def git_connector_validate_command(args):
 def git_connector_sync_command(args):
     """Handle git connector sync command - create repos from TOML config"""
     try:
-        config_file = args.git_config_file or os.path.join(args.data_dir, "git_connectors.toml")
+        config_file = args.config or os.path.join(args.data_dir, "git_connectors.toml")
         persistence_manager = PersistenceManager(args.data_dir, config_file)
 
         print("Creating git repositories from TOML configuration...")
@@ -385,15 +479,18 @@ def git_connector_sync_command(args):
         return 1
 
 
-def main():
+def main(argv: Optional[list[str]] = None):
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
-        description="Relay Git Sync CLI - Sync collaborative documents to Git remotes",
+        description="Relay Git Sync CLI - Sync collaborative documents to Git repositories",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Sync specific folder (folder-id is just the folder UUID)
-  python cli.py sync --relay-id abc123... --folder-id def456...
+  git-sync sync --folder-id def456...
+
+  # Relay auth setup
+  git-sync generate-auth
 
   # Git connector management
   python cli.py git init
@@ -412,12 +509,13 @@ Examples:
   python cli.py ssh show-pubkey
 
 Authentication Methods:
-  Webhooks: WEBHOOK_SECRET (plain shared secret or whsec_* for Svix)
+  Relay:    setup command generates RELAY_SERVER_API_KEY
+  Webhooks: WEBHOOK_SECRET shared secret
   APIs:     JWT_SECRET (sk_* prefix required) + Bearer tokens
 
 Git Connectors:
   Configure automatic git remote setup via TOML files
-  File: <data-dir>/git_connectors.toml (or --git-config-file)
+  File: <data-dir>/git_connectors.toml
         """,
     )
 
@@ -429,26 +527,70 @@ Git Connectors:
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument(
-        "--git-config-file",
+        "-c",
+        "--config",
+        dest="config",
         default=None,
-        help="Path to git connectors TOML configuration file (default: <data-dir>/git_connectors.toml)",
+        help="Path to git_connectors.toml (default: <data-dir>/git_connectors.toml)",
+    )
+    parser.add_argument(
+        "--git-config-file",
+        dest="config",
+        help=argparse.SUPPRESS,
     )
 
     # Subcommands
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
+    # Setup command
+    setup_parser = subparsers.add_parser(
+        "setup",
+        aliases=["generate-auth"],
+        help="Generate Relay auth setup",
+    )
+    setup_parser.add_argument(
+        "--server-url",
+        help="Relay server URL (overrides RELAY_SERVER_URL and [relay].url)",
+    )
+    setup_parser.add_argument(
+        "-c",
+        "--config",
+        dest="config",
+        default=argparse.SUPPRESS,
+        help="Path to git_connectors.toml (default: <data-dir>/git_connectors.toml)",
+    )
+    setup_parser.add_argument(
+        "--relay-id",
+        help="Relay ID (UUID)",
+    )
+    setup_parser.add_argument(
+        "--webhook-url",
+        help="Public Git Sync webhook endpoint URL (overrides [webhook].url)",
+    )
+    setup_parser.add_argument("--expires-days", type=int, help="API key lifetime in days")
+    setup_parser.add_argument("--json", action="store_true", help="Print JSON")
+    setup_parser.set_defaults(func=setup_command)
+
+    inspect_token_parser = subparsers.add_parser(
+        "inspect-token", help="Inspect a Relay server API key"
+    )
+    inspect_token_parser.add_argument(
+        "token",
+        nargs="?",
+        help="API key to inspect (default: RELAY_SERVER_API_KEY env var)",
+    )
+    inspect_token_parser.add_argument("--json", action="store_true", help="Print JSON")
+    inspect_token_parser.set_defaults(func=inspect_token_command)
+
     # Sync command
     sync_parser = subparsers.add_parser("sync", help="Sync relay documents to git")
-    sync_parser.add_argument("--relay-id", required=True, help="Relay ID (UUID) to sync")
     sync_parser.add_argument(
-        "--relay-server-url",
-        default=os.getenv("RELAY_SERVER_URL"),
-        help="Relay server URL (default: from RELAY_SERVER_URL env var)",
+        "--relay-id",
+        help="Relay ID (UUID) to sync",
     )
     sync_parser.add_argument(
-        "--relay-server-api-key",
-        default=os.getenv("RELAY_SERVER_API_KEY"),
-        help="Relay server API key (default: from RELAY_SERVER_API_KEY env var)",
+        "--relay-server-url",
+        help="Relay server URL (overrides RELAY_SERVER_URL and [relay].url)",
     )
     sync_parser.add_argument(
         "--folder-id",
@@ -492,7 +634,10 @@ Git Connectors:
 
     # git add command
     git_add_parser = git_subparsers.add_parser("add", help="Add git connector configuration")
-    git_add_parser.add_argument("--relay-id", required=True, help="Relay ID (UUID)")
+    git_add_parser.add_argument(
+        "--relay-id",
+        help="Relay ID (UUID)",
+    )
     git_add_parser.add_argument("--folder-id", required=True, help="Shared folder ID (UUID)")
     git_add_parser.add_argument("--url", required=True, help="Git repository URL")
     git_add_parser.add_argument("--branch", default="main", help="Git branch (default: main)")
@@ -508,7 +653,10 @@ Git Connectors:
     git_remove_parser = git_subparsers.add_parser(
         "remove", help="Remove git connector configuration"
     )
-    git_remove_parser.add_argument("--relay-id", required=True, help="Relay ID (UUID)")
+    git_remove_parser.add_argument(
+        "--relay-id",
+        help="Relay ID (UUID)",
+    )
     git_remove_parser.add_argument("--folder-id", required=True, help="Shared folder ID (UUID)")
     git_remove_parser.set_defaults(func=git_connector_remove_command)
 
@@ -544,7 +692,7 @@ Git Connectors:
     api_create_parser.set_defaults(func=api_token_create_command)
 
     # Parse arguments
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Configure logging level
     if args.verbose:
@@ -590,17 +738,46 @@ Git Connectors:
 
     # Validate sync command requirements
     if args.command == "sync":
+        args.relay_server_url = resolve_relay_url(
+            args.relay_server_url,
+            data_dir=args.data_dir,
+            git_config_file=args.config,
+        )
         if not args.relay_server_url:
             print(
-                "Error: Relay server URL is required. Set RELAY_SERVER_URL environment variable or use --relay-server-url flag."
+                "Error: Relay server URL is required. Set [relay].url in git_connectors.toml or pass --relay-server-url."
             )
             return 1
+        args.relay_server_api_key = os.getenv("RELAY_SERVER_API_KEY")
 
-        # Validate relay ID format (basic UUID check)
-        if not args.relay_id or len(args.relay_id.split("-")) != 5:
+        try:
+            args.relay_id = resolve_relay_id(
+                args.relay_id,
+                data_dir=args.data_dir,
+                git_config_file=args.config,
+            )
+        except ValueError as e:
+            print(f"Error: {e}")
+            return 1
+
+        if not args.relay_id:
+            print(
+                "Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id."
+            )
+            return 1
+        if len(args.relay_id.split("-")) != 5:
             print(
                 "Error: Invalid relay ID format. Expected UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
             )
+            return 1
+
+        if not args.relay_server_api_key:
+            setup = generate_setup(
+                server_url=args.relay_server_url.rstrip("/"),
+                relay_id=args.relay_id,
+                expires_days=None,
+            )
+            print_setup(setup)
             return 1
 
         # Validate folder ID format if provided (should be simple UUID)

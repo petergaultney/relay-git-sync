@@ -18,6 +18,81 @@ except ImportError:
         tomllib = None
 
 
+def default_git_config_file(data_dir: str = ".", git_config_file: Optional[str] = None) -> str:
+    return git_config_file or os.path.join(data_dir, "git_connectors.toml")
+
+
+def relay_ids_from_config(config_file: str) -> List[str]:
+    config = GitConnectorConfig(config_file)
+    relay_ids = set()
+    if config.relay_id:
+        relay_ids.add(config.relay_id)
+    relay_ids.update(connector.relay_id for connector in config.connectors)
+    return sorted(relay_ids)
+
+
+def relay_url_from_config(config_file: str) -> Optional[str]:
+    return GitConnectorConfig(config_file).relay_url
+
+
+def webhook_url_from_config(config_file: str) -> Optional[str]:
+    return GitConnectorConfig(config_file).webhook_url
+
+
+def resolve_webhook_url(
+    explicit_url: Optional[str],
+    *,
+    data_dir: str = ".",
+    git_config_file: Optional[str] = None,
+) -> Optional[str]:
+    if explicit_url:
+        return explicit_url
+
+    config_file = default_git_config_file(data_dir, git_config_file)
+    return webhook_url_from_config(config_file)
+
+
+def resolve_relay_url(
+    explicit_url: Optional[str],
+    *,
+    data_dir: str = ".",
+    git_config_file: Optional[str] = None,
+    env_var: str = "RELAY_SERVER_URL",
+) -> Optional[str]:
+    if explicit_url:
+        return explicit_url
+
+    config_file = default_git_config_file(data_dir, git_config_file)
+    config_url = relay_url_from_config(config_file)
+    if config_url:
+        return config_url
+
+    return os.getenv(env_var)
+
+
+def resolve_relay_id(
+    explicit_relay_id: Optional[str],
+    *,
+    data_dir: str = ".",
+    git_config_file: Optional[str] = None,
+    env_var: str = "RELAY_ID",
+) -> Optional[str]:
+    if explicit_relay_id:
+        return explicit_relay_id
+
+    config_file = default_git_config_file(data_dir, git_config_file)
+    config_relay_ids = relay_ids_from_config(config_file)
+    if len(config_relay_ids) == 1:
+        return config_relay_ids[0]
+
+    if len(config_relay_ids) > 1:
+        raise ValueError(
+            f"Multiple relay IDs found in {config_file}. Pass --relay-id to choose one."
+        )
+
+    return os.getenv(env_var)
+
+
 @dataclass
 class GitConnector:
     """Configuration for a git connector linking a shared folder to a git repository"""
@@ -54,6 +129,10 @@ class GitConnectorConfig:
 
     def __init__(self, config_file: Optional[str] = None):
         self.config_file = config_file or "git_connectors.toml"
+        self.relay_id: Optional[str] = None
+        self.relay_url: Optional[str] = None
+        self.webhook_url: Optional[str] = None
+        self.known_hosts: List[str] = []
         self.connectors: List[GitConnector] = []
         self._load_config()
 
@@ -72,6 +151,30 @@ class GitConnectorConfig:
             with open(config_path, "rb") as f:
                 config_data = tomllib.load(f)
 
+            relay_config = config_data.get("relay", {})
+            if relay_config:
+                if not isinstance(relay_config, dict):
+                    logger.error("relay must be a table in TOML config")
+                    return
+                self.relay_id = relay_config.get("id")
+                self.relay_url = relay_config.get("url")
+
+            webhook_config = config_data.get("webhook", {})
+            if webhook_config:
+                if not isinstance(webhook_config, dict):
+                    logger.error("webhook must be a table in TOML config")
+                    return
+                self.webhook_url = webhook_config.get("url")
+
+            known_hosts = config_data.get("known_hosts", [])
+            if known_hosts:
+                if not isinstance(known_hosts, list) or not all(
+                    isinstance(entry, str) for entry in known_hosts
+                ):
+                    logger.error("known_hosts must be an array of strings in TOML config")
+                    return
+                self.known_hosts = known_hosts
+
             # Parse git_connector entries
             git_connectors = config_data.get("git_connector", [])
             if not isinstance(git_connectors, list):
@@ -83,8 +186,8 @@ class GitConnectorConfig:
                 try:
                     connector = GitConnector(
                         shared_folder_id=connector_data["shared_folder_id"],
-                        relay_id=connector_data["relay_id"],
-                        url=connector_data["url"],
+                        relay_id=connector_data.get("relay_id") or self.relay_id,
+                        url=connector_data.get("url", ""),
                         branch=connector_data.get("branch", "main"),
                         remote_name=connector_data.get("remote_name", "origin"),
                         prefix=connector_data.get("prefix", ""),
@@ -170,6 +273,12 @@ class GitConnectorConfig:
     def validate_config(self) -> List[str]:
         """Validate all git connector configurations and return error messages"""
         errors = []
+
+        if self.relay_url and not self.relay_url.startswith(("http://", "https://")):
+            errors.append(f"Invalid relay.url: {self.relay_url}. Must start with http:// or https://")
+
+        if self.webhook_url and not self.webhook_url.startswith(("http://", "https://")):
+            errors.append(f"Invalid webhook.url: {self.webhook_url}. Must start with http:// or https://")
 
         # Check for duplicate relay_id/folder_id combinations
         seen_combinations = set()
