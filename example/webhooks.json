@@ -1,0 +1,10 @@
+{
+  "configs": [
+    {
+      "prefix": "<relay guid>",
+      "url": "<git sync server URL>",
+      "timeout_ms": 5000,
+      "auth_token": "<webhook token>"
+    }
+  ]
+}
