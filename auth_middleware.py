@@ -7,7 +7,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.requests import Request
 from jwt_auth import JWTValidator
-from svix.webhooks import Webhook
+
+try:
+    from svix.webhooks import Webhook
+except ImportError:
+    Webhook = None
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +21,9 @@ class DefaultRejectMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request, call_next):
         response = await call_next(request)
+
+        if getattr(response, "status_code", None) == 404:
+            return response
 
         # Check if endpoint lacks explicit auth configuration
         auth_explicitly_disabled = getattr(request.state, "auth_explicitly_disabled", False)
@@ -93,8 +100,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return response
 
     async def _validate_svix_signature(self, request: Request):
-        """Validate Svix-style HMAC signature"""
+        """Validate signed webhook requests."""
         try:
+            if Webhook is None:
+                request.state.auth_error = (
+                    "Svix webhook support is not installed. Install git-sync[svix]."
+                )
+                return
+
             # Get required headers - check both svix- and webhook- prefixes
             svix_id = None
             svix_timestamp = None
@@ -115,7 +128,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # Get request body
             body = await request.body()
 
-            # Validate using Svix SDK
+            # Validate signed webhook payload
             wh = Webhook(self.webhook_secret)
             wh.verify(
                 body,
@@ -126,7 +139,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 },
             )
 
-            # Create a minimal user object for Svix auth
+            # Create a minimal user object for signed webhook auth
             request.state.user = {"scope": "webhook", "auth_type": "svix", "svix_id": svix_id}
 
         except Exception as e:
@@ -310,7 +323,7 @@ def default_reject_handler(request: Request) -> JSONResponse:
 
 # Convenience decorators for common use cases
 def webhook_auth(func: Callable) -> Callable:
-    """Shorthand for webhook endpoint authentication (Svix HMAC or shared secret only, no JWT)"""
+    """Shorthand for webhook endpoint authentication."""
     return require_auth(scopes=["webhook"])(func)
 
 

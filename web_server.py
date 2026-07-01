@@ -42,15 +42,20 @@ class StarletteWebServer:
             Middleware(DefaultRejectMiddleware),
         ]
 
+        routes = [
+            Route("/health", self.health_check, methods=["GET"]),
+            Route("/api/pubkey", self.get_pubkey, methods=["GET"]),
+            Route("/docs", self.api_docs, methods=["GET"]),
+            Route("/openapi.yaml", self.openapi_spec, methods=["GET"]),
+        ]
+        if webhook_secret:
+            routes.insert(0, Route("/webhooks", self.handle_webhook, methods=["POST"]))
+        else:
+            logger.info("Webhook secret not configured; /webhooks route disabled")
+
         # Create Starlette app
         self.app = Starlette(
-            routes=[
-                Route("/webhooks", self.handle_webhook, methods=["POST"]),
-                Route("/health", self.health_check, methods=["GET"]),
-                Route("/api/pubkey", self.get_pubkey, methods=["GET"]),
-                Route("/docs", self.api_docs, methods=["GET"]),
-                Route("/openapi.yaml", self.openapi_spec, methods=["GET"]),
-            ],
+            routes=routes,
             middleware=middleware,
         )
 
@@ -355,7 +360,7 @@ class StarletteWebServer:
         auth_mode = "disabled"
         if self.webhook_secret:
             if self.webhook_secret.startswith("whsec_"):
-                auth_mode = "Svix HMAC signature validation"
+                auth_mode = "Signed webhook validation"
             else:
                 auth_mode = "Shared secret validation (exact match)"
 

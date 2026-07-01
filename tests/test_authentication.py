@@ -16,6 +16,7 @@ from auth_middleware import (
     api_auth,
     require_auth,
 )
+import auth_middleware
 from cli import generate_webhook_secret, create_jwt_token
 from web_server import StarletteWebServer
 from webhook_handler import WebhookProcessor
@@ -116,6 +117,36 @@ def test_basic_middleware_functionality():
     assert response.status_code == 401
 
     print("\n✅ Basic middleware functionality tests passed!")
+
+
+def test_svix_webhook_auth_fails_cleanly_without_optional_dependency(monkeypatch):
+    monkeypatch.setattr(auth_middleware, "Webhook", None)
+
+    @webhook_auth
+    async def webhook_endpoint(request: Request):
+        return JSONResponse({"message": "ok"})
+
+    app = Starlette(
+        routes=[Route("/webhooks", webhook_endpoint, methods=["POST"])],
+        middleware=[
+            Middleware(AuthMiddleware, webhook_secret="whsec_test"),
+            Middleware(DefaultRejectMiddleware),
+        ],
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/webhooks",
+        json={"test": "data"},
+        headers={
+            "webhook-id": "msg_test",
+            "webhook-timestamp": "1",
+            "webhook-signature": "v1,test",
+        },
+    )
+
+    assert response.status_code == 401
+    assert "git-sync[svix]" in response.json()["error"]
 
 
 def test_secret_generation():

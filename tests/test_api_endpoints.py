@@ -32,6 +32,20 @@ class TestPubkeyEndpoint:
 
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def test_webhook_route_disabled_without_secret(self):
+        """Test webhook endpoint is only mounted when webhook config exists"""
+        self.persistence_manager.ssh_key_manager = None
+        server = StarletteWebServer(
+            self.webhook_processor,
+            self.operations_queue,
+            "",
+            self.persistence_manager,
+        )
+        client = TestClient(server.app)
+
+        assert client.get("/health").status_code == 200
+        assert client.post("/webhooks", json={"test": "data"}).status_code == 404
+
     def test_pubkey_endpoint_with_ssh_key(self):
         """Test pubkey endpoint when SSH key is available"""
         # Mock SSH key manager with a test key
