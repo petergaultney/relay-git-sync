@@ -99,7 +99,7 @@ class GitConnector:
 
     shared_folder_id: str
     relay_id: str
-    url: str
+    url: str = ""
     branch: str = "main"
     remote_name: str = "origin"
     prefix: str = ""
@@ -110,8 +110,6 @@ class GitConnector:
             raise ValueError("shared_folder_id is required")
         if not self.relay_id:
             raise ValueError("relay_id is required")
-        if not self.url:
-            raise ValueError("url is required")
         if not self.branch:
             raise ValueError("branch is required")
         if not self.remote_name:
@@ -291,8 +289,11 @@ class GitConnectorConfig:
                 )
             seen_combinations.add(combo)
 
-            # Validate URL format
-            if not connector.url.startswith(("http://", "https://", "git@", "ssh://")):
+            # Validate URL format when a remote is configured. Missing URL means
+            # local-only snapshots: the connector still commits, but never pushes.
+            if connector.url and not connector.url.startswith(
+                ("http://", "https://", "git@", "ssh://")
+            ):
                 errors.append(
                     f"Invalid URL format in git_connector[{i}]: {connector.url}. "
                     f"Must start with http://, https://, git@, or ssh://"

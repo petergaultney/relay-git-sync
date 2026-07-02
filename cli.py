@@ -299,7 +299,7 @@ def git_connector_list_command(args):
         for i, connector in enumerate(git_config.connectors, 1):
             print(f"{i}. Relay: {connector.relay_id}")
             print(f"   Folder: {connector.shared_folder_id}")
-            print(f"   URL: {connector.url}")
+            print(f"   URL: {connector.url or '(local only)'}")
             print(f"   Branch: {connector.branch}")
             print(f"   Remote: {connector.remote_name}")
             print(f"   Prefix: {connector.prefix or '(root)'}")
@@ -342,7 +342,7 @@ def git_connector_add_command(args):
         print("Git connector added successfully:")
         print(f"  Relay ID: {connector.relay_id}")
         print(f"  Folder ID: {connector.shared_folder_id}")
-        print(f"  URL: {connector.url}")
+        print(f"  URL: {connector.url or '(local only)'}")
         print(f"  Branch: {connector.branch}")
         print(f"  Remote: {connector.remote_name}")
         print(f"  Prefix: {connector.prefix or '(root)'}")
@@ -468,7 +468,10 @@ def git_connector_sync_command(args):
                         connector.relay_id, connector.shared_folder_id
                     )
                     print(f"  - {repo_key} -> {folder_path}")
-                    print(f"    Remote: {connector.remote_name} = {connector.url}")
+                    if connector.url:
+                        print(f"    Remote: {connector.remote_name} = {connector.url}")
+                    else:
+                        print("    Remote: (local only)")
         else:
             print("No new repositories created (may already exist)")
 
@@ -639,7 +642,11 @@ Git Connectors:
         help="Relay ID (UUID)",
     )
     git_add_parser.add_argument("--folder-id", required=True, help="Shared folder ID (UUID)")
-    git_add_parser.add_argument("--url", required=True, help="Git repository URL")
+    git_add_parser.add_argument(
+        "--url",
+        default="",
+        help="Git repository URL; omit for local-only snapshots",
+    )
     git_add_parser.add_argument("--branch", default="main", help="Git branch (default: main)")
     git_add_parser.add_argument(
         "--remote-name", default="origin", help="Git remote name (default: origin)"

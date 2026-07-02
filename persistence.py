@@ -346,19 +346,25 @@ class PersistenceManager:
                     # Initialize Git repository
                     self.init_git_repo(relay_id, folder_id)
 
-                    # Configure git remote from TOML
-                    success = self.configure_git_remote(
-                        relay_id, folder_id, connector.url, connector.remote_name
-                    )
-
-                    if success:
-                        logger.info(
-                            f"Created Git repository from TOML config: {relay_id}/{folder_id} -> {connector.url}"
+                    if connector.url:
+                        # Configure git remote from TOML
+                        success = self.configure_git_remote(
+                            relay_id, folder_id, connector.url, connector.remote_name
                         )
-                        initialized_count += 1
+
+                        if success:
+                            logger.info(
+                                f"Created Git repository from TOML config: {relay_id}/{folder_id} -> {connector.url}"
+                            )
+                            initialized_count += 1
+                        else:
+                            logger.warning(
+                                f"Created Git repository but failed to configure remote for {relay_id}/{folder_id}"
+                            )
+                            initialized_count += 1
                     else:
-                        logger.warning(
-                            f"Created Git repository but failed to configure remote for {relay_id}/{folder_id}"
+                        logger.info(
+                            f"Created local-only Git repository from TOML config: {relay_id}/{folder_id}"
                         )
                         initialized_count += 1
 
@@ -680,7 +686,7 @@ class PersistenceManager:
         """Automatically configure git remote based on TOML configuration"""
         try:
             connector = self.git_config.get_connector_for_folder(relay_id, folder_id)
-            if connector:
+            if connector and connector.url:
                 success = self.configure_git_remote(
                     relay_id, folder_id, connector.url, connector.remote_name
                 )
@@ -694,9 +700,14 @@ class PersistenceManager:
                         f"Failed to auto-configure git remote for folder {folder_id} in relay {relay_id}"
                     )
             else:
-                logger.debug(
-                    f"No git connector configured for folder {folder_id} in relay {relay_id}"
-                )
+                if connector:
+                    logger.info(
+                        f"Git connector for folder {folder_id} in relay {relay_id} is local-only"
+                    )
+                else:
+                    logger.debug(
+                        f"No git connector configured for folder {folder_id} in relay {relay_id}"
+                    )
         except Exception as e:
             logger.error(f"Error auto-configuring git remote for folder {folder_id}: {e}")
 
