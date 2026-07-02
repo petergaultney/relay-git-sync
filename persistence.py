@@ -643,6 +643,7 @@ class PersistenceManager:
                     self.git_repos[repo_key] = git.Repo.clone_from(
                         connector.url, folder_path, branch=connector.branch
                     )
+                    self._repair_tracking_branch_if_obvious(repo_key, self.git_repos[repo_key])
                     print(f"Successfully cloned repository to {folder_path}")
                     return self.git_repos[repo_key]
                 except Exception as e:
@@ -697,10 +698,12 @@ class PersistenceManager:
                 )
             else:
                 # Add new remote
-                git_repo.create_remote(remote_name, remote_url)
+                remote = git_repo.create_remote(remote_name, remote_url)
                 print(
                     f"Added remote '{remote_name}' for folder {folder_id} in relay {relay_id}: {remote_url}"
                 )
+
+            self._repair_tracking_branch_if_obvious(repo_key, git_repo, remote)
 
             return True
 
@@ -810,12 +813,99 @@ class PersistenceManager:
                     # Push to remote if configured
                     self._push_to_remote(repo_key, git_repo)
 
+                elif git_repo.remotes and self._has_unpushed_commits(repo_key, git_repo):
+                    logger.info(f"Pushing previously unpushed commits for repository {repo_key}")
+                    self._push_to_remote(repo_key, git_repo)
+
             return committed_any
 
         except Exception as e:
             logger.error(f"Error committing to git: {e}")
             logger.error(f"Git commit traceback: {traceback.format_exc()}")
             return False
+
+    def _has_unpushed_commits(self, repo_key: str, git_repo: git.Repo) -> bool:
+        try:
+            current_branch = git_repo.active_branch
+        except (TypeError, ValueError):
+            return False
+
+        tracking_branch = current_branch.tracking_branch()
+        if tracking_branch is None:
+            remote = (
+                git_repo.remotes.origin
+                if "origin" in [r.name for r in git_repo.remotes]
+                else git_repo.remotes[0]
+            )
+            self._safe_git_fetch_with_debug(remote, repo_key)
+            tracking_branch = self._repair_tracking_branch_if_obvious(
+                repo_key, git_repo, remote
+            )
+
+        if tracking_branch is None:
+            remote_name = (
+                "origin"
+                if "origin" in [r.name for r in git_repo.remotes]
+                else git_repo.remotes[0].name
+            )
+            remote_branch = f"{remote_name}/{current_branch.name}"
+            try:
+                remote_commit = git_repo.commit(remote_branch)
+            except Exception:
+                return True
+            return remote_commit.hexsha != current_branch.commit.hexsha
+
+        try:
+            ahead = git_repo.git.rev_list("--count", f"{tracking_branch.name}..{current_branch.name}")
+            return int(ahead) > 0
+        except Exception as e:
+            logger.debug(f"Could not determine unpushed commit state: {e}")
+            return False
+
+    def _repair_tracking_branch_if_obvious(self, repo_key: str, git_repo: git.Repo, remote=None):
+        """Set branch upstream when local branch and remote branch clearly match."""
+        try:
+            current_branch = git_repo.active_branch
+        except (TypeError, ValueError):
+            return None
+
+        tracking_branch = current_branch.tracking_branch()
+        if tracking_branch is not None:
+            return tracking_branch
+
+        if not git_repo.remotes:
+            return None
+
+        if remote is None:
+            remote = (
+                git_repo.remotes.origin
+                if "origin" in [r.name for r in git_repo.remotes]
+                else git_repo.remotes[0]
+            )
+
+        remote_branch_name = f"{remote.name}/{current_branch.name}"
+        try:
+            git_repo.commit(remote_branch_name)
+        except Exception:
+            logger.debug(
+                f"No obvious upstream to repair for {repo_key}: missing {remote_branch_name}"
+            )
+            return None
+
+        try:
+            self._safe_git_operation(
+                lambda: git_repo.git.branch(
+                    "--set-upstream-to", remote_branch_name, current_branch.name
+                )
+            )
+            logger.info(
+                f"Repaired upstream tracking for {repo_key}: "
+                f"{current_branch.name} -> {remote_branch_name}"
+            )
+            return current_branch.tracking_branch()
+        except git.exc.GitCommandError as e:
+            logger.warning(f"Failed to repair upstream tracking for {repo_key}: {e}")
+            return None
 
     def _pull_from_remote(self, repo_key: str, git_repo: git.Repo):
         """Pull latest changes from remote repository using rebase"""
@@ -838,10 +928,15 @@ class PersistenceManager:
                 tracking_branch = current_branch.tracking_branch()
 
                 if tracking_branch is None:
-                    # No tracking branch set up yet, just fetch
+                    # No tracking branch set up yet. Fetch, then repair if the
+                    # matching remote branch exists.
                     print(f"Fetching from {origin.name} for repository {repo_key}")
                     self._safe_git_fetch_with_debug(origin, repo_key)
-                    return
+                    tracking_branch = self._repair_tracking_branch_if_obvious(
+                        repo_key, git_repo, origin
+                    )
+                    if tracking_branch is None:
+                        return
 
                 # The remote-tracking ref only moves when this clone fetches or pushes,
                 # so it is stale whenever anything else (another connector, a human)
@@ -1036,6 +1131,14 @@ class PersistenceManager:
             try:
                 current_branch = git_repo.active_branch
                 if current_branch.tracking_branch() is None:
+                    self._safe_git_fetch_with_debug(origin, repo_key)
+                    tracking_branch = self._repair_tracking_branch_if_obvious(
+                        repo_key, git_repo, origin
+                    )
+                else:
+                    tracking_branch = current_branch.tracking_branch()
+
+                if tracking_branch is None:
                     # Set upstream for first push
                     self._push_and_verify(origin, current_branch.name, set_upstream=True)
                     print(

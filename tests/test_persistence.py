@@ -825,6 +825,11 @@ class TestOutOfBandPushRecovery:
         repo.git.config("user.email", "test@example.com")
         repo.git.config("user.name", "test")
 
+    def _unset_upstream(self, repo):
+        repo.git.config("--unset", "branch.main.remote")
+        repo.git.config("--unset", "branch.main.merge")
+        assert repo.active_branch.tracking_branch() is None
+
     def _other_pushes(self, name):
         with open(os.path.join(self.other_path, name), "w") as f:
             f.write("content\n")
@@ -859,6 +864,53 @@ class TestOutOfBandPushRecovery:
 
         assert self._reached_remote(self.mine.head.commit.hexsha), (
             "rejected push was not recovered (rebase + re-push)"
+        )
+
+    def test_configure_remote_repairs_obvious_missing_upstream(self):
+        self._unset_upstream(self.mine)
+
+        assert self.pm.configure_git_remote("relay", "folder", self.remote_path, "origin")
+
+        tracking_branch = self.mine.active_branch.tracking_branch()
+        assert tracking_branch is not None
+        assert tracking_branch.name == "origin/main"
+
+    def test_rejected_push_recovers_after_missing_upstream_repair(self):
+        self._unset_upstream(self.mine)
+
+        # The remote moves while this repo has no branch.main.* tracking config.
+        # Because origin/main exists locally, the connector can repair the config,
+        # rebase onto the refreshed remote, and push without force.
+        self._other_pushes("racing-without-upstream.md")
+        with open(os.path.join(self.mine_path, "mine-without-upstream.md"), "w") as f:
+            f.write("mine\n")
+        self.mine.git.add(A=True)
+        self.mine.index.commit("stale-parent commit without upstream")
+
+        self.pm._push_to_remote(self.repo_key, self.mine)
+
+        assert self.mine.active_branch.tracking_branch().name == "origin/main"
+        assert self._reached_remote(self.mine.head.commit.hexsha), (
+            "missing-upstream push was not repaired and recovered"
+        )
+
+    def test_missing_upstream_repair_fetches_remote_branch_first(self):
+        self._unset_upstream(self.mine)
+        self.mine.git.update_ref("-d", "refs/remotes/origin/main")
+
+        with pytest.raises(git.exc.BadName):
+            self.mine.commit("origin/main")
+
+        with open(os.path.join(self.mine_path, "mine-after-deleted-ref.md"), "w") as f:
+            f.write("mine\n")
+        self.mine.git.add(A=True)
+        self.mine.index.commit("local commit without remote tracking ref")
+
+        self.pm._push_to_remote(self.repo_key, self.mine)
+
+        assert self.mine.active_branch.tracking_branch().name == "origin/main"
+        assert self._reached_remote(self.mine.head.commit.hexsha), (
+            "missing remote-tracking ref was not fetched before upstream repair"
         )
 
     def test_push_and_verify_raises_on_rejection(self):
