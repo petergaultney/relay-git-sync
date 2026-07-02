@@ -45,10 +45,6 @@ Shared Folder to one local Git repository. Add `url` when that repository should
 push to a remote.
 
 ```toml
-known_hosts = [
-  "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleHostKey",
-]
-
 [relay]
 url = "https://your-relay-server.com"
 id = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
@@ -166,18 +162,18 @@ uv run git-sync ssh show-pubkey
 
 Add the public key to your Git hosting service (GitHub, GitLab, etc.) as a deploy key with write permissions.
 
-For SSH Git remotes, Git Sync also needs host keys for each Git host. Add them to
-top-level `known_hosts` in `git_connectors.toml`:
+GitHub SSH remotes automatically use GitHub's published host keys. For custom SSH Git
+hosts, add host keys to top-level `known_hosts` in `git_connectors.toml`:
 
 ```toml
 known_hosts = [
-  "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleHostKey",
-  "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleHostKey",
+  "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleHostKey",
 ]
 ```
 
 Get host key lines with `ssh-keyscan <git-host>`, then verify the fingerprint against
-your Git provider before deploying.
+your Git provider before deploying. HTTPS Git remotes and local-only connectors do not
+use SSH host keys.
 
 ### Running the Server
 

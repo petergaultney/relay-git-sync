@@ -2,9 +2,11 @@
 
 import os
 import logging
+import re
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,78 @@ except ImportError:
     except ImportError:
         logger.error("TOML parsing not available. Install tomli for Python < 3.11")
         tomllib = None
+
+
+# Keep these aligned with GitHub's published SSH host keys:
+# https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+BUILTIN_KNOWN_HOSTS: Dict[str, List[str]] = {
+    "github.com": [
+        "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+        "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
+        "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=",
+    ],
+}
+
+
+def ssh_host_from_git_url(url: str) -> Optional[str]:
+    if not url:
+        return None
+
+    stripped = url.strip()
+    parsed = urlparse(stripped)
+    if parsed.scheme == "ssh":
+        return parsed.hostname
+    if parsed.scheme:
+        return None
+
+    match = re.match(r"^(?:[^@]+@)?([^:/]+):", stripped)
+    if match:
+        return match.group(1)
+
+    return None
+
+
+def _known_hosts_entries_for_urls(urls: List[str]) -> List[str]:
+    entries: List[str] = []
+    for url in urls:
+        host = ssh_host_from_git_url(url)
+        if host in BUILTIN_KNOWN_HOSTS:
+            entries.extend(BUILTIN_KNOWN_HOSTS[host])
+    return _dedupe_preserving_order(entries)
+
+
+def _dedupe_preserving_order(entries: List[str]) -> List[str]:
+    seen = set()
+    deduped = []
+    for entry in entries:
+        if entry not in seen:
+            seen.add(entry)
+            deduped.append(entry)
+    return deduped
+
+
+def _known_hosts_entry_matches_host(entry: str, host: str) -> bool:
+    stripped = entry.strip()
+    if not stripped or stripped.startswith("#"):
+        return False
+
+    parts = stripped.split()
+    if not parts:
+        return False
+
+    hosts_field = parts[1] if parts[0].startswith("@") and len(parts) > 1 else parts[0]
+    for known_host in hosts_field.split(","):
+        if known_host == host:
+            return True
+        bracket_match = re.match(r"^\[([^\]]+)\]:(\d+)$", known_host)
+        if bracket_match and bracket_match.group(1) == host:
+            return True
+
+    return False
+
+
+def _known_hosts_cover_host(entries: List[str], host: str) -> bool:
+    return any(_known_hosts_entry_matches_host(entry, host) for entry in entries)
 
 
 def default_git_config_file(data_dir: str = ".", git_config_file: Optional[str] = None) -> str:
@@ -131,6 +205,7 @@ class GitConnectorConfig:
         self.relay_url: Optional[str] = None
         self.webhook_url: Optional[str] = None
         self.known_hosts: List[str] = []
+        self.explicit_known_hosts: List[str] = []
         self.connectors: List[GitConnector] = []
         self._load_config()
 
@@ -171,6 +246,7 @@ class GitConnectorConfig:
                 ):
                     logger.error("known_hosts must be an array of strings in TOML config")
                     return
+                self.explicit_known_hosts = known_hosts
                 self.known_hosts = known_hosts
 
             # Parse git_connector entries
@@ -199,6 +275,13 @@ class GitConnectorConfig:
                     logger.error(f"Missing required field in git_connector[{i}]: {e}")
                 except ValueError as e:
                     logger.error(f"Invalid git_connector[{i}] configuration: {e}")
+
+            inferred_known_hosts = _known_hosts_entries_for_urls(
+                [connector.url for connector in self.connectors]
+            )
+            self.known_hosts = _dedupe_preserving_order(
+                self.explicit_known_hosts + inferred_known_hosts
+            )
 
         except Exception as e:
             logger.error(f"Error loading git connector config from {config_path}: {e}")
@@ -253,7 +336,7 @@ class GitConnectorConfig:
                 "webhook": {
                     "url": self.webhook_url,
                 },
-                "known_hosts": self.known_hosts,
+                "known_hosts": self.explicit_known_hosts,
                 "git_connector": [
                     {
                         "shared_folder_id": c.shared_folder_id,
@@ -263,7 +346,7 @@ class GitConnectorConfig:
                         "prefix": c.prefix,
                     }
                     for c in self.connectors
-                ]
+                ],
             }
 
             # For saving, we need tomlkit or similar - for now just document the format
@@ -280,10 +363,14 @@ class GitConnectorConfig:
         errors = []
 
         if self.relay_url and not self.relay_url.startswith(("http://", "https://")):
-            errors.append(f"Invalid relay.url: {self.relay_url}. Must start with http:// or https://")
+            errors.append(
+                f"Invalid relay.url: {self.relay_url}. Must start with http:// or https://"
+            )
 
         if self.webhook_url and not self.webhook_url.startswith(("http://", "https://")):
-            errors.append(f"Invalid webhook.url: {self.webhook_url}. Must start with http:// or https://")
+            errors.append(
+                f"Invalid webhook.url: {self.webhook_url}. Must start with http:// or https://"
+            )
 
         # Check for duplicate relay_id/folder_id combinations
         seen_combinations = set()
@@ -304,6 +391,16 @@ class GitConnectorConfig:
                 errors.append(
                     f"Invalid URL format in git_connector[{i}]: {connector.url}. "
                     f"Must start with http://, https://, git@, or ssh://"
+                )
+
+            ssh_host = ssh_host_from_git_url(connector.url)
+            if (
+                ssh_host
+                and ssh_host not in BUILTIN_KNOWN_HOSTS
+                and not _known_hosts_cover_host(self.explicit_known_hosts, ssh_host)
+            ):
+                errors.append(
+                    f"Missing known_hosts entry for SSH host in git_connector[{i}]: {ssh_host}"
                 )
 
             # Validate branch name (basic check)
@@ -329,12 +426,11 @@ class GitConnectorConfig:
         example_content = """# Git Connector Configuration
 # Configure git repositories to sync with shared folders
 
-# SSH known host keys for Git providers used by SSH Git URLs.
-# Add every SSH Git host you use here. Get lines with `ssh-keyscan <git-host>`
-# and verify the fingerprint against your Git provider before deploying.
+# SSH known host keys for custom Git hosts.
+# GitHub SSH URLs automatically use GitHub's published host keys.
+# Add explicit entries here for every custom SSH Git host you use.
 # known_hosts = [
-#     "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
-#     "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+#     "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
 # ]
 
 [relay]

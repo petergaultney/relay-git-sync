@@ -768,6 +768,33 @@ url = "https://auth.system3.dev"
         assert f"UserKnownHostsFile={persistence.ssh_key_manager.known_hosts_path}" in ssh_command
         assert "StrictHostKeyChecking=yes" in ssh_command
 
+    def test_persistence_uses_inferred_github_known_hosts_file(self):
+        """Test GitHub SSH remotes get built-in known host keys"""
+        with open(os.path.join(self.temp_dir, "git_connectors.toml"), "w") as f:
+            f.write(
+                """
+[relay]
+id = "85a06712-af14-47bc-a859-e8106cc786e8"
+url = "https://auth.system3.dev"
+
+[[git_connector]]
+shared_folder_id = "3667fcda-755e-472b-abea-4b4fc96873a9"
+url = "git@github.com:example/repository.git"
+"""
+            )
+
+        with patch.object(PersistenceManager, "_initialize_all_git_repos"):
+            persistence = PersistenceManager(self.temp_dir)
+
+        assert any(
+            entry.startswith("github.com ssh-ed25519 ")
+            for entry in persistence.ssh_key_manager.known_hosts
+        )
+        assert os.path.exists(persistence.ssh_key_manager.known_hosts_path)
+        ssh_command = os.environ["GIT_SSH_COMMAND"]
+        assert f"UserKnownHostsFile={persistence.ssh_key_manager.known_hosts_path}" in ssh_command
+        assert "StrictHostKeyChecking=yes" in ssh_command
+
     def test_invalid_key_format_raises_error(self):
         """Test that invalid key format raises RuntimeError"""
         os.environ["SSH_PRIVATE_KEY"] = "not a valid key"

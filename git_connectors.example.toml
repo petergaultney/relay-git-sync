@@ -1,20 +1,18 @@
 # Git Connector Configuration
 # Configure git repositories to sync with shared folders
 
-# SSH known host keys for Git providers
-# These are used for host verification when using SSH Git URLs.
-# Add every SSH Git host you use here.
+# SSH known host keys for custom Git hosts.
+# GitHub SSH URLs automatically use GitHub's published host keys.
+# Add explicit entries here for every custom SSH Git host you use.
 #
-# To get host keys for other providers:
-# - GitHub: ssh-keyscan github.com
+# To get host keys for custom providers:
 # - GitLab: ssh-keyscan gitlab.com
 # - Bitbucket: ssh-keyscan bitbucket.org  
 # - Your server: ssh-keyscan your-git-server.com
 #
 # Example:
 # known_hosts = [
-#     "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
-#     "bitbucket.org ssh-rsa AAAAB3NzaC1yc2EAAAABI...",
+#     "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
 #     "your-git-server.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI..."
 # ]
 
