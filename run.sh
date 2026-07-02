@@ -16,13 +16,9 @@ echo "$SSH_PRIVATE_KEY" | ssh-add -
 echo "export SSH_AUTH_SOCK=$SSH_AUTH_SOCK" > /tmp/ssh-agent.env
 echo "export SSH_AGENT_PID=$SSH_AGENT_PID" >> /tmp/ssh-agent.env
 
-# Add SSH host keys
-mkdir -p ~/.ssh
-
-# Add GitHub's host key
-ssh-keyscan github.com >> ~/.ssh/known_hosts
-# ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
-# ssh-keyscan bitbucket.org >> ~/.ssh/known_hosts
+# SSH host keys are managed by the app (git_connectors.toml known_hosts plus
+# keys fetched from hosted providers) with strict host key checking. Do not
+# ssh-keyscan here: it would trust whatever host answers first.
 
 echo "SSH agent started with PID $SSH_AGENT_PID"
 

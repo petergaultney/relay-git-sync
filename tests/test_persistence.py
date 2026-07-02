@@ -632,6 +632,39 @@ class TestSSHKeyManager:
         assert public_key.startswith("ssh-rsa ")
         assert len(public_key.split()) >= 2  # ssh-rsa + key data
 
+    def test_known_hosts_are_written_when_configured(self):
+        """Test writing configured SSH known host keys"""
+        known_hosts = ["git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestHostKey"]
+
+        ssh_manager = SSHKeyManager(self.temp_dir, known_hosts=known_hosts)
+
+        assert os.path.exists(ssh_manager.known_hosts_path)
+        with open(ssh_manager.known_hosts_path, "r") as f:
+            assert f.read() == known_hosts[0] + "\n"
+
+    def test_persistence_uses_configured_known_hosts_file(self):
+        """Test configured known_hosts is wired into GIT_SSH_COMMAND"""
+        known_host = "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestHostKey"
+        with open(os.path.join(self.temp_dir, "git_connectors.toml"), "w") as f:
+            f.write(
+                f"""
+known_hosts = ["{known_host}"]
+
+[relay]
+id = "85a06712-af14-47bc-a859-e8106cc786e8"
+url = "https://auth.system3.dev"
+"""
+            )
+
+        with patch.object(PersistenceManager, "_initialize_all_git_repos"):
+            persistence = PersistenceManager(self.temp_dir)
+
+        assert persistence.ssh_key_manager.known_hosts == [known_host]
+        assert os.path.exists(persistence.ssh_key_manager.known_hosts_path)
+        ssh_command = os.environ["GIT_SSH_COMMAND"]
+        assert f"UserKnownHostsFile={persistence.ssh_key_manager.known_hosts_path}" in ssh_command
+        assert "StrictHostKeyChecking=yes" in ssh_command
+
     def test_invalid_key_format_raises_error(self):
         """Test that invalid key format raises RuntimeError"""
         os.environ["SSH_PRIVATE_KEY"] = "not a valid key"

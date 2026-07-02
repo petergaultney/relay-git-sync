@@ -35,12 +35,15 @@ class SSHKeyManager:
         self,
         data_dir: str = ".",
         ssh_key_env_var: str = "SSH_PRIVATE_KEY",
+        known_hosts: Optional[List[str]] = None,
     ):
         self.data_dir = data_dir
         self.ssh_key_env_var = ssh_key_env_var
+        self.known_hosts = known_hosts or []
         self.ssh_dir = os.path.join(data_dir, "ssh")
         self.private_key_path = os.path.join(self.ssh_dir, "git_sync_key")
         self.public_key_path = os.path.join(self.ssh_dir, "git_sync_key.pub")
+        self.known_hosts_path = os.path.join(self.ssh_dir, "known_hosts")
 
         self._setup_ssh_keys()
 
@@ -65,8 +68,16 @@ class SSHKeyManager:
                 f.write(public_key + "\n")
             os.chmod(self.public_key_path, 0o644)  # Read for owner and group
 
+            if self.known_hosts:
+                with open(self.known_hosts_path, "w") as f:
+                    f.write("\n".join(self.known_hosts))
+                    f.write("\n")
+                os.chmod(self.known_hosts_path, 0o644)
+
             logger.info(f"SSH keys written to {self.ssh_dir}")
             logger.info(f"Public key: {public_key[:50]}...")
+            if self.known_hosts:
+                logger.info(f"Known hosts written to {self.known_hosts_path}")
 
         except Exception as e:
             raise RuntimeError(f"Failed to setup SSH keys: {e}")
@@ -142,7 +153,11 @@ class PersistenceManager:
         if ssh_private_key:
             print(f"SSH_PRIVATE_KEY found, length: {len(ssh_private_key)} chars")
             try:
-                self.ssh_key_manager = SSHKeyManager(self.data_dir, "SSH_PRIVATE_KEY")
+                self.ssh_key_manager = SSHKeyManager(
+                    self.data_dir,
+                    "SSH_PRIVATE_KEY",
+                    known_hosts=self.git_config.known_hosts,
+                )
                 print("SSH key manager initialized successfully")
                 # Set up SSH environment globally for all Git operations
                 self._setup_global_ssh_environment()
@@ -366,14 +381,32 @@ class PersistenceManager:
         # Use the SSH key files created by SSHKeyManager
         private_key_path = self.ssh_key_manager.private_key_path
 
-        # Set up SSH command to use the key file
-        # Let run.sh handle known_hosts with ssh-keyscan
-        ssh_command = f"ssh -o LogLevel=ERROR -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o ConnectTimeout=10 -i {private_key_path}"
+        # Set up SSH command to use the key file.
+        ssh_options = [
+            "-o LogLevel=ERROR",
+            "-o PasswordAuthentication=no",
+            "-o PreferredAuthentications=publickey",
+            "-o ConnectTimeout=10",
+        ]
+        if self.ssh_key_manager.known_hosts:
+            ssh_options.extend(
+                [
+                    "-o StrictHostKeyChecking=yes",
+                    f"-o UserKnownHostsFile={self.ssh_key_manager.known_hosts_path}",
+                ]
+            )
+        ssh_options.append(f"-i {private_key_path}")
+        ssh_command = "ssh " + " ".join(ssh_options)
         os.environ["GIT_SSH_COMMAND"] = ssh_command
 
         logger.info(f"Global SSH setup - Using SSH command: {ssh_command}")
         logger.info(f"Global SSH setup - Private key: {private_key_path}")
-        logger.info("Global SSH setup - Known hosts handled by run.sh")
+        if self.ssh_key_manager.known_hosts:
+            logger.info(
+                f"Global SSH setup - Known hosts: {self.ssh_key_manager.known_hosts_path}"
+            )
+        else:
+            logger.info("Global SSH setup - Known hosts handled by system defaults or run.sh")
 
     def _safe_git_operation(self, func, *args, **kwargs):
         """Execute git operation with locking and error recovery"""
@@ -414,7 +447,10 @@ class PersistenceManager:
                 logger.info(
                     f"  Public key file exists: {public_key_exists} ({self.ssh_key_manager.public_key_path})"
                 )
-                logger.info("  Known hosts handled by run.sh")
+                if self.ssh_key_manager.known_hosts:
+                    logger.info(f"  Known hosts file: {self.ssh_key_manager.known_hosts_path}")
+                else:
+                    logger.info("  Known hosts handled by system defaults or run.sh")
 
             # Perform the fetch
             self._safe_git_operation(lambda: origin.fetch())
