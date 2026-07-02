@@ -9,6 +9,9 @@ from sync_engine import SyncEngine
 from webhook_handler import WebhookProcessor
 from operations_queue import OperationsQueue
 from web_server import create_server
+from websocket_listener import WebsocketChangeListener
+from relay_auth import generate_setup, print_setup
+from git_config import resolve_relay_id, resolve_relay_url, resolve_webhook_url
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -82,10 +85,32 @@ def run_server(
     commit_interval=10,
     data_dir=".",
     git_config_file=None,
+    websocket_reconnect_delay=5.0,
+    relay_id: str = "",
 ):
+    if not relay_id:
+        raise ValueError("Relay ID is required")
+
+    if not relay_server_api_key:
+        print_setup(
+            generate_setup(
+                server_url=relay_server_url.rstrip("/"),
+                relay_id=relay_id,
+                expires_days=None,
+                webhook_url=resolve_webhook_url(
+                    None,
+                    data_dir=data_dir,
+                    git_config_file=git_config_file,
+                ),
+            )
+        )
+        return
+
     print(f"Relay server: {relay_server_url}")
     print(f"Data directory: {data_dir}")
     print(f"Git commit interval set to {commit_interval} seconds")
+
+    websocket_listener = None
 
     try:
         # Initialize components
@@ -101,6 +126,14 @@ def run_server(
         # Run startup sync for all configured git connectors
         startup_sync_all_folders(sync_engine, persistence_manager)
 
+        websocket_listener = WebsocketChangeListener(
+            relay_client,
+            operations_queue,
+            persistence_manager,
+            reconnect_delay=websocket_reconnect_delay,
+        )
+        websocket_listener.start()
+
         # Start the server
         web_server.run(port=port)
 
@@ -110,6 +143,9 @@ def run_server(
     except Exception as e:
         logger.error(f"Error starting server: {e}")
         raise
+    finally:
+        if websocket_listener is not None:
+            websocket_listener.stop()
 
 
 if __name__ == "__main__":
@@ -123,13 +159,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--relay-server-url",
-        default=os.getenv("RELAY_SERVER_URL"),
-        help="Relay server URL (default: from RELAY_SERVER_URL env var)",
+        help="Relay server URL (overrides RELAY_SERVER_URL and [relay].url)",
     )
     parser.add_argument(
-        "--relay-server-api-key",
-        default=os.getenv("RELAY_SERVER_API_KEY"),
-        help="Relay server API key (default: from RELAY_SERVER_API_KEY env var)",
+        "--relay-id",
+        help="Relay ID (overrides RELAY_ID and [relay].id)",
     )
     parser.add_argument(
         "--data-dir",
@@ -142,19 +176,66 @@ if __name__ == "__main__":
         help="Webhook secret for authentication (default: from WEBHOOK_SECRET env var)",
     )
     parser.add_argument(
-        "--git-config-file",
+        "-c",
+        "--config",
+        dest="config",
         default=None,
-        help="Path to git connectors TOML configuration file (default: <data-dir>/git_connectors.toml)",
+        help="Path to git_connectors.toml (default: <data-dir>/git_connectors.toml)",
+    )
+    parser.add_argument(
+        "--git-config-file",
+        dest="config",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--websocket-reconnect-delay",
+        type=float,
+        default=float(os.getenv("RELAY_WEBSOCKET_RECONNECT_DELAY", "5")),
+        help="Seconds to wait before reconnecting Relay websocket listeners",
     )
 
     args = parser.parse_args()
 
-    # Validate required relay server URL
+    args.relay_server_url = resolve_relay_url(
+        args.relay_server_url,
+        data_dir=args.data_dir,
+        git_config_file=args.config,
+    )
     if not args.relay_server_url:
         print(
-            "Error: Relay server URL is required. Set RELAY_SERVER_URL environment variable or use --relay-server-url flag."
+            "Error: Relay server URL is required. Set [relay].url in git_connectors.toml or pass --relay-server-url."
         )
-        print("For management commands (webhook, ssh, api), use: python cli.py")
+        print("For management commands (setup, webhook, ssh, api), use: git-sync")
+        exit(1)
+
+    try:
+        args.relay_id = resolve_relay_id(
+            args.relay_id,
+            data_dir=args.data_dir,
+            git_config_file=args.config,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        exit(1)
+
+    if not args.relay_id:
+        print("Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id.")
+        exit(1)
+
+    relay_server_api_key = os.getenv("RELAY_SERVER_API_KEY")
+
+    if not relay_server_api_key:
+        run_server(
+            args.relay_server_url,
+            relay_server_api_key,
+            args.webhook_secret,
+            args.port,
+            args.commit_interval,
+            args.data_dir,
+            args.config,
+            args.websocket_reconnect_delay,
+            relay_id=args.relay_id,
+        )
         exit(1)
 
     # Check for SSH key (warn if missing, don't fail)
@@ -166,10 +247,12 @@ if __name__ == "__main__":
 
     run_server(
         args.relay_server_url,
-        args.relay_server_api_key,
+        relay_server_api_key,
         args.webhook_secret,
         args.port,
         args.commit_interval,
         args.data_dir,
-        args.git_config_file,
+        args.config,
+        args.websocket_reconnect_delay,
+        relay_id=args.relay_id,
     )

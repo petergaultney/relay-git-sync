@@ -5,7 +5,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "y-sweet-sdk>=0.6.3",
     "requests",
     "pycrdt",
     "GitPython",
@@ -14,20 +13,55 @@ dependencies = [
     "cbor2>=5.6.5",
     "python-dateutil",
     "pyjwt",
-    "svix",
     "starlette",
     "uvicorn",
+    "websocket-client>=1.8.0",
     "pyyaml>=6.0.2",
     "rich>=13.7.0",
     "tomli>=1.2.0;python_version<'3.11'",
 ]
 
 [project.optional-dependencies]
+svix = [
+    "svix",
+]
 dev = [
     "black",
     "isort",
     "pre-commit",
 ]
+
+[project.scripts]
+git-sync = "cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+    "app",
+    "auth_middleware",
+    "cli",
+    "git_config",
+    "jwt_auth",
+    "models",
+    "operations_queue",
+    "persistence",
+    "relay_auth",
+    "relay_client",
+    "s3rn",
+    "sync_engine",
+    "web_server",
+    "webhook_handler",
+    "websocket_listener",
+]
+
+[tool.setuptools.packages.find]
+include = ["relay_sdk*"]
+
+[tool.setuptools.data-files]
+"templates" = ["templates/relay_auth_setup.md"]
 
 [tool.black]
 line-length = 100

@@ -392,7 +392,7 @@ wheels = [
 [[package]]
 name = "git-sync"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "cbor2" },
     { name = "cryptography" },
@@ -405,11 +405,9 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "starlette" },
-    { name = "svix" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "uvicorn" },
-    { name = "y-sweet-sdk", version = "0.6.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "y-sweet-sdk", version = "0.8.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "websocket-client" },
 ]
 
 [package.optional-dependencies]
@@ -417,6 +415,9 @@ dev = [
     { name = "black" },
     { name = "isort" },
     { name = "pre-commit" },
+]
+svix = [
+    { name = "svix" },
 ]
 
 [package.dev-dependencies]
@@ -440,12 +441,12 @@ requires-dist = [
     { name = "requests" },
     { name = "rich", specifier = ">=13.7.0" },
     { name = "starlette" },
-    { name = "svix" },
+    { name = "svix", marker = "extra == 'svix'" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.2.0" },
     { name = "uvicorn" },
-    { name = "y-sweet-sdk", specifier = ">=0.6.3" },
+    { name = "websocket-client", specifier = ">=1.8.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["svix", "dev"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.4.1" }]
@@ -1176,6 +1177,15 @@ wheels = [
 ]
 
 [[package]]
+name = "websocket-client"
+version = "1.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/41/aa4bf9664e4cda14c3b39865b12251e8e7d239f4cd0e3cc1b6c2ccde25c1/websocket_client-1.9.0.tar.gz", hash = "sha256:9e813624b6eb619999a97dc7958469217c3176312b3a16a4bd1bc7e08a46ec98", size = 70576 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/34/db/b10e48aa8fff7407e67470363eac595018441cf32d5e1001567a7aeba5d2/websocket_client-1.9.0-py3-none-any.whl", hash = "sha256:af248a825037ef591efbf6ed20cc5faa03d3b47b9e5a2230a529eeee1c1fc3ef", size = 82616 },
+]
+
+[[package]]
 name = "werkzeug"
 version = "3.1.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1249,36 +1259,4 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/6a/e1/0122853035b40b3f333bbb25f1939fc1045e21dd518f7f0922b60c156f7c/wrapt-1.17.2-cp313-cp313t-win32.whl", hash = "sha256:13e6afb7fe71fe7485a4550a8844cc9ffbe263c0f1a1eea569bc7091d4898555", size = 37986 },
     { url = "https://files.pythonhosted.org/packages/09/5e/1655cf481e079c1f22d0cabdd4e51733679932718dc23bf2db175f329b76/wrapt-1.17.2-cp313-cp313t-win_amd64.whl", hash = "sha256:eaf675418ed6b3b31c7a989fd007fa7c3be66ce14e5c3b27336383604c9da85c", size = 40750 },
     { url = "https://files.pythonhosted.org/packages/2d/82/f56956041adef78f849db6b289b282e72b55ab8045a75abad81898c28d19/wrapt-1.17.2-py3-none-any.whl", hash = "sha256:b18f2d1533a71f069c7f82d524a52599053d4c7166e9dd374ae2136b7f40f7c8", size = 23594 },
-]
-
-[[package]]
-name = "y-sweet-sdk"
-version = "0.6.3"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version < '3.12'",
-]
-dependencies = [
-    { name = "pycrdt", marker = "python_full_version < '3.12'" },
-    { name = "requests", marker = "python_full_version < '3.12'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/fc/3b/7dea3261416094da942b548ad972d144829c06c06a7f211a4985c01a46ab/y_sweet_sdk-0.6.3.tar.gz", hash = "sha256:fb82476fd919fa336b5dc260d80f54b1c5b888b49150991aab15399c02f368b6", size = 5053 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/38/96/3fd2d39f2c895233b2efd9a53e3a5b0809f412169a74aad9de8e3cc6e731/y_sweet_sdk-0.6.3-py3-none-any.whl", hash = "sha256:9fffa366291725c43d134690c8ee1a214ee86c2aa3a42a7a6c63e8e00519280d", size = 5232 },
-]
-
-[[package]]
-name = "y-sweet-sdk"
-version = "0.8.2"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.12'",
-]
-dependencies = [
-    { name = "pycrdt", marker = "python_full_version >= '3.12'" },
-    { name = "requests", marker = "python_full_version >= '3.12'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/3d/06/5761b256dc8b24053a1e794c0d625e61aab18d9b18da68751ca4bea956c4/y_sweet_sdk-0.8.2.tar.gz", hash = "sha256:b6c95bcbe593161ee78e3c2859f321e8dd776e6ce739e07e8d8d39f124deb2aa", size = 5469 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4a/80/7f4ba1cc79a16e4abdf0dff4b13575dd3517edcc7f68f8ce930f9d953c91/y_sweet_sdk-0.8.2-py3-none-any.whl", hash = "sha256:daea6eab375786a43136d16068c420b2e8811042118887620bccc933d2f546c8", size = 5434 },
 ]
