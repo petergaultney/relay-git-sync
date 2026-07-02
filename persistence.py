@@ -146,6 +146,9 @@ class PersistenceManager:
         # Initialize git connector configuration first to get known hosts
         config_path = default_git_config_file(self.data_dir, git_config_file)
         self.git_config = GitConnectorConfig(config_path)
+        config_errors = self.git_config.validate_config()
+        if config_errors:
+            raise ValueError("Invalid git connector config: " + "; ".join(config_errors))
 
         # Initialize SSH key manager only if SSH_PRIVATE_KEY is set
         self.ssh_key_manager = None

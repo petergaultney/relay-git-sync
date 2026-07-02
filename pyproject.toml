@@ -58,7 +58,7 @@ py-modules = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["relay_sdk*"]
+include = ["git_host_keys*", "relay_sdk*"]
 
 [tool.setuptools.data-files]
 "templates" = ["templates/relay_auth_setup.md"]

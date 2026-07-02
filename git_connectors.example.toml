@@ -2,13 +2,11 @@
 # Configure git repositories to sync with shared folders
 
 # SSH known host keys for custom Git hosts.
-# GitHub SSH URLs automatically use GitHub's published host keys.
-# Add explicit entries here for every custom SSH Git host you use.
+# GitHub, GitLab.com, and Bitbucket Cloud SSH URLs automatically fetch published host keys.
+# Add explicit entries here for offline deployments, custom hosts, or self-hosted Git hosts.
 #
-# To get host keys for custom providers:
-# - GitLab: ssh-keyscan gitlab.com
-# - Bitbucket: ssh-keyscan bitbucket.org  
-# - Your server: ssh-keyscan your-git-server.com
+# For custom hosts, copy the provider's published known_hosts entries or use
+# ssh-keyscan your-git-server.com, then verify the fingerprint before deploying.
 #
 # Example:
 # known_hosts = [

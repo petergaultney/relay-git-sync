@@ -769,7 +769,7 @@ url = "https://auth.system3.dev"
         assert "StrictHostKeyChecking=yes" in ssh_command
 
     def test_persistence_uses_inferred_github_known_hosts_file(self):
-        """Test GitHub SSH remotes get built-in known host keys"""
+        """Test GitHub SSH remotes get provider known host keys"""
         with open(os.path.join(self.temp_dir, "git_connectors.toml"), "w") as f:
             f.write(
                 """
@@ -783,13 +783,14 @@ url = "git@github.com:example/repository.git"
 """
             )
 
-        with patch.object(PersistenceManager, "_initialize_all_git_repos"):
+        github_known_hosts = ["github.com ssh-ed25519 AAAATestHostKey"]
+        with (
+            patch("git_config.fetch_known_hosts_for_host", return_value=github_known_hosts),
+            patch.object(PersistenceManager, "_initialize_all_git_repos"),
+        ):
             persistence = PersistenceManager(self.temp_dir)
 
-        assert any(
-            entry.startswith("github.com ssh-ed25519 ")
-            for entry in persistence.ssh_key_manager.known_hosts
-        )
+        assert persistence.ssh_key_manager.known_hosts == github_known_hosts
         assert os.path.exists(persistence.ssh_key_manager.known_hosts_path)
         ssh_command = os.environ["GIT_SSH_COMMAND"]
         assert f"UserKnownHostsFile={persistence.ssh_key_manager.known_hosts_path}" in ssh_command

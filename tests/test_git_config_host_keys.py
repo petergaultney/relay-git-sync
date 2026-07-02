@@ -2,6 +2,9 @@ import os
 import shutil
 import tempfile
 
+import pytest
+
+from git_host_keys import KnownHostKeyFetchError
 from git_config import GitConnectorConfig
 
 
@@ -21,7 +24,73 @@ class TestGitConfigHostKeys:
             f.write(body)
         return config_path
 
-    def test_github_ssh_url_adds_builtin_known_hosts(self):
+    @pytest.mark.parametrize(
+        ("url", "host"),
+        [
+            ("git@github.com:example/repository.git", "github.com"),
+            ("git@gitlab.com:example/repository.git", "gitlab.com"),
+            ("ssh://git@bitbucket.org/example/repository.git", "bitbucket.org"),
+        ],
+    )
+    def test_hosted_provider_ssh_url_fetches_known_hosts(self, url, host, monkeypatch):
+        def fake_fetch_known_hosts(fetch_host):
+            assert fetch_host == host
+            return [
+                f"{host} ssh-ed25519 AAAATestEd25519",
+                f"{host} ecdsa-sha2-nistp256 AAAATestEcdsa",
+                f"{host} ssh-rsa AAAATestRsa",
+            ]
+
+        monkeypatch.setattr("git_config.fetch_known_hosts_for_host", fake_fetch_known_hosts)
+        config_path = self._write_config(
+            f"""
+[relay]
+id = "{self.relay_id}"
+url = "https://auth.system3.dev"
+
+[[git_connector]]
+shared_folder_id = "{self.folder_id}"
+url = "{url}"
+"""
+        )
+
+        config = GitConnectorConfig(config_path)
+
+        assert config.validate_config() == []
+        assert any(entry.startswith(f"{host} ssh-ed25519 ") for entry in config.known_hosts)
+        assert any(entry.startswith(f"{host} ecdsa-sha2-nistp256 ") for entry in config.known_hosts)
+        assert any(entry.startswith(f"{host} ssh-rsa ") for entry in config.known_hosts)
+
+    def test_explicit_known_hosts_for_hosted_provider_skips_fetch(self, monkeypatch):
+        def fail_fetch_known_hosts(host):
+            raise AssertionError(f"fetch should not be called for {host}")
+
+        monkeypatch.setattr("git_config.fetch_known_hosts_for_host", fail_fetch_known_hosts)
+        known_host = "github.com ssh-ed25519 AAAATestHostKey"
+        config_path = self._write_config(
+            f"""
+known_hosts = ["{known_host}"]
+
+[relay]
+id = "{self.relay_id}"
+url = "https://auth.system3.dev"
+
+[[git_connector]]
+shared_folder_id = "{self.folder_id}"
+url = "git@github.com:example/repository.git"
+"""
+        )
+
+        config = GitConnectorConfig(config_path)
+
+        assert config.validate_config() == []
+        assert config.known_hosts == [known_host]
+
+    def test_hosted_provider_fetch_failure_is_validation_error(self, monkeypatch):
+        def fail_fetch_known_hosts(host):
+            raise KnownHostKeyFetchError("provider endpoint unavailable")
+
+        monkeypatch.setattr("git_config.fetch_known_hosts_for_host", fail_fetch_known_hosts)
         config_path = self._write_config(
             f"""
 [relay]
@@ -36,12 +105,10 @@ url = "git@github.com:example/repository.git"
 
         config = GitConnectorConfig(config_path)
 
-        assert config.validate_config() == []
-        assert any(entry.startswith("github.com ssh-ed25519 ") for entry in config.known_hosts)
-        assert any(
-            entry.startswith("github.com ecdsa-sha2-nistp256 ") for entry in config.known_hosts
-        )
-        assert any(entry.startswith("github.com ssh-rsa ") for entry in config.known_hosts)
+        assert config.validate_config() == [
+            "Unable to fetch known_hosts for SSH host in git_connector[0]: "
+            "github.com: provider endpoint unavailable"
+        ]
 
     def test_https_and_local_connectors_do_not_add_known_hosts(self):
         config_path = self._write_config(

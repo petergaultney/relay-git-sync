@@ -162,8 +162,9 @@ uv run git-sync ssh show-pubkey
 
 Add the public key to your Git hosting service (GitHub, GitLab, etc.) as a deploy key with write permissions.
 
-GitHub SSH remotes automatically use GitHub's published host keys. For custom SSH Git
-hosts, add host keys to top-level `known_hosts` in `git_connectors.toml`:
+GitHub, GitLab.com, and Bitbucket Cloud SSH remotes automatically fetch the providers'
+published host keys. For offline deployments, custom hosts, or self-hosted Git hosts,
+add host keys to top-level `known_hosts` in `git_connectors.toml`:
 
 ```toml
 known_hosts = [
@@ -171,9 +172,10 @@ known_hosts = [
 ]
 ```
 
-Get host key lines with `ssh-keyscan <git-host>`, then verify the fingerprint against
-your Git provider before deploying. HTTPS Git remotes and local-only connectors do not
-use SSH host keys.
+For custom hosts, copy the provider's published known_hosts entries or get host key
+lines with `ssh-keyscan <git-host>`, then verify the fingerprint against your Git
+provider before deploying. Explicit `known_hosts` entries override provider fetching
+for that host. HTTPS Git remotes and local-only connectors do not use SSH host keys.
 
 ### Running the Server
 
