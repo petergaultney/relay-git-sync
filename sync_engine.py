@@ -50,6 +50,12 @@ class SyncEngine:
 
             # Check if this is a known folder
             if resource_id in self.persistence_manager.filemeta_folders.get(relay_id, {}):
+                if not self.persistence_manager.should_sync_folder(relay_id, resource_id):
+                    print(
+                        f"Skipping document change for unconfigured folder {relay_id}/{resource_id}"
+                    )
+                    return SyncResult(resource=None, operations=[], success=True)
+
                 # This is a folder - fetch filemeta and process
                 folder_resource = S3RemoteFolder(relay_id, resource_id)
                 doc = self.relay_client.get_doc_object(folder_resource)
@@ -113,6 +119,15 @@ class SyncEngine:
                     )
                     operations = []
                 else:
+                    folder_id = getattr(document_resource, "folder_id", None)
+                    if folder_id and not self.persistence_manager.should_sync_folder(
+                        relay_id, folder_id
+                    ):
+                        print(
+                            f"Skipping document change for unconfigured folder {relay_id}/{folder_id}"
+                        )
+                        return SyncResult(resource=None, operations=[], success=True)
+
                     # Fetch content based on resource type
                     if isinstance(document_resource, S3RemoteDocument):
                         content_str = self.relay_client.fetch_document_content(document_resource)
@@ -192,6 +207,10 @@ class SyncEngine:
                 filemeta_dict = parsed_content["filemeta"]
                 folder_uuid = S3RN.get_folder_id(resource)
                 print(f"Document {resource} is a folder with filemeta_v0")
+
+                if not self.persistence_manager.should_sync_folder(relay_id, folder_uuid):
+                    print(f"Skipping sync request for unconfigured folder {relay_id}/{folder_uuid}")
+                    return SyncResult(resource=resource, operations=[], success=True)
 
                 # Initialize git repo for this folder
                 self.persistence_manager.init_git_repo(relay_id, folder_uuid)
@@ -273,15 +292,16 @@ class SyncEngine:
             # Note: Git repo initialization is now done per-folder when needed
 
             results = []
-            # Get stored filemeta to know which folders exist
-            stored_relay_filemeta = self.persistence_manager.filemeta_folders.get(relay_id, {})
+            configured_connectors = self.persistence_manager.git_config.get_connectors_for_relay(
+                relay_id
+            )
 
-            if not stored_relay_filemeta:
-                print(f"No folders found for relay {relay_id} in stored data")
+            if not configured_connectors:
+                print(f"No git connectors configured for relay {relay_id}")
                 return []
 
-            for folder_uuid, stored_filemeta_dict in stored_relay_filemeta.items():
-                # Use folder UUID directly
+            for connector in configured_connectors:
+                folder_uuid = connector.shared_folder_id
                 folder_resource = S3RemoteFolder(relay_id, folder_uuid)
 
                 # Create sync request that will fetch fresh data from server

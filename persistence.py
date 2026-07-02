@@ -267,12 +267,12 @@ class PersistenceManager:
             logger.error(f"Error during git lock file cleanup: {e}")
 
     def _initialize_all_git_repos(self):
-        """Initialize Git repositories for all folders (existing + TOML configured)"""
+        """Initialize Git repositories for configured folders."""
         try:
             logger.info("Initializing Git repositories...")
             initialized_count = 0
 
-            # First: Initialize repos for existing folders with state
+            # First: Initialize repos for configured folders that already have state.
             state_base_dir = os.path.join(self.data_dir, "state")
             if os.path.exists(state_base_dir):
                 # Scan all relay state directories
@@ -287,6 +287,12 @@ class PersistenceManager:
                     # Initialize Git repos for all folders in this relay
                     filemeta_folders = self.filemeta_folders.get(relay_id, {})
                     for folder_id in filemeta_folders.keys():
+                        if not self.should_sync_folder(relay_id, folder_id):
+                            logger.info(
+                                f"Skipping unconfigured persisted folder {relay_id}/{folder_id}"
+                            )
+                            continue
+
                         try:
                             self.init_git_repo(relay_id, folder_id)
                             # Auto-configure git remote if connector exists
@@ -308,6 +314,28 @@ class PersistenceManager:
 
         except Exception as e:
             logger.error(f"Error during Git repository initialization: {e}")
+
+    def is_folder_configured(self, relay_id: str, folder_id: str) -> bool:
+        return self.git_config.get_connector_for_folder(relay_id, folder_id) is not None
+
+    def should_sync_folder(self, relay_id: str, folder_id: str) -> bool:
+        configured_folder_ids = self._configured_folder_ids(relay_id)
+        if not configured_folder_ids:
+            return True
+        return folder_id in configured_folder_ids
+
+    def _configured_folder_ids(self, relay_id: str) -> set[str]:
+        return {
+            connector.shared_folder_id
+            for connector in self.git_config.get_connectors_for_relay(relay_id)
+        }
+
+    def _is_repo_key_configured(self, repo_key: str) -> bool:
+        try:
+            relay_id, folder_id = repo_key.split("/", 1)
+        except ValueError:
+            return False
+        return self.should_sync_folder(relay_id, folder_id)
 
     def _initialize_git_repos_from_toml(self) -> int:
         """Initialize Git repositories from TOML configuration, creating minimal state as needed"""
@@ -735,6 +763,10 @@ class PersistenceManager:
         """
         pushed_count = 0
         for repo_key, git_repo in self.git_repos.items():
+            if not self._is_repo_key_configured(repo_key):
+                logger.info(f"Skipping push for unconfigured repository {repo_key}")
+                continue
+
             if git_repo.remotes:
                 try:
                     self._push_to_remote(repo_key, git_repo)
@@ -754,6 +786,10 @@ class PersistenceManager:
             committed_any = False
             # Check each folder repository for changes
             for repo_key, git_repo in self.git_repos.items():
+                if not self._is_repo_key_configured(repo_key):
+                    logger.info(f"Skipping commit for unconfigured repository {repo_key}")
+                    continue
+
                 if git_repo.is_dirty() or git_repo.untracked_files:
                     # Pull latest changes before committing if remote is configured
                     if git_repo.remotes:
@@ -1276,9 +1312,13 @@ class PersistenceManager:
 
             relay_index = self.resource_index[relay_id]
             relay_index.clear()  # Rebuild from scratch
+            configured_folder_ids = self._configured_folder_ids(relay_id)
 
             # Index folders from filemeta_folders
             for folder_id in self.filemeta_folders.get(relay_id, {}).keys():
+                if configured_folder_ids and folder_id not in configured_folder_ids:
+                    continue
+
                 relay_index[folder_id] = {
                     "type": "folder",
                     "folder_id": folder_id,
@@ -1288,6 +1328,9 @@ class PersistenceManager:
 
             # Index documents from local_file_state (the authoritative source)
             for folder_id, folder_state in self.local_file_state.get(relay_id, {}).items():
+                if configured_folder_ids and folder_id not in configured_folder_ids:
+                    continue
+
                 for path, file_info in folder_state.items():
                     if isinstance(file_info, dict) and "doc_id" in file_info:
                         resource_id = file_info["doc_id"]
@@ -1317,6 +1360,9 @@ class PersistenceManager:
 
             # Index documents from filemeta_folders (includes documents not yet synced to disk)
             for folder_id, filemeta in self.filemeta_folders.get(relay_id, {}).items():
+                if configured_folder_ids and folder_id not in configured_folder_ids:
+                    continue
+
                 for path, metadata in filemeta.items():
                     if isinstance(metadata, dict) and "id" in metadata:
                         resource_id = metadata["id"]

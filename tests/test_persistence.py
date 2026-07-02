@@ -80,7 +80,8 @@ class TestResourceIndexManagement:
 
     def setup_method(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.persistence = PersistenceManager(self.temp_dir)
+        with patch.object(PersistenceManager, "_initialize_all_git_repos"):
+            self.persistence = PersistenceManager(self.temp_dir)
         self.relay_id = "test-relay-123"
 
         # Initialize test data
@@ -221,6 +222,108 @@ class TestResourceIndexManagement:
 
         # Regular IDs should still be there
         assert "doc-123" in self.persistence.resource_index[self.relay_id]
+
+
+class TestConfiguredFolderGuardrails:
+    relay_id = "85a06712-af14-47bc-a859-e8106cc786e8"
+    configured_folder_id = "3667fcda-755e-472b-abea-4b4fc96873a9"
+    stale_folder_id = "bcb3e341-6ddf-4a3d-9e8f-8fc3773cd49f"
+
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        config_path = os.path.join(self.temp_dir, "git_connectors.toml")
+        with open(config_path, "w") as f:
+            f.write(
+                f"""
+[relay]
+id = "{self.relay_id}"
+url = "https://auth.system3.dev"
+
+[[git_connector]]
+shared_folder_id = "{self.configured_folder_id}"
+url = "git@github.com:No-Instructions/git-sync-test.git"
+branch = "main"
+remote_name = "origin"
+prefix = "notes"
+"""
+            )
+        with patch.object(PersistenceManager, "_initialize_all_git_repos"):
+            self.persistence = PersistenceManager(self.temp_dir)
+
+    def teardown_method(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_resource_index_ignores_unconfigured_persisted_folders(self):
+        self.persistence.filemeta_folders[self.relay_id] = {
+            self.configured_folder_id: {
+                "/home.md": {"id": "configured-doc", "type": "document"}
+            },
+            self.stale_folder_id: {"/old.md": {"id": "stale-doc", "type": "document"}},
+        }
+        self.persistence.local_file_state[self.relay_id] = {
+            self.configured_folder_id: {
+                "/home.md": {
+                    "doc_id": "configured-doc",
+                    "type": "document",
+                    "hash": "configured-hash",
+                }
+            },
+            self.stale_folder_id: {
+                "/old.md": {
+                    "doc_id": "stale-doc",
+                    "type": "document",
+                    "hash": "stale-hash",
+                }
+            },
+        }
+
+        self.persistence._build_resource_index(self.relay_id)
+
+        index = self.persistence.resource_index[self.relay_id]
+        assert self.configured_folder_id in index
+        assert "configured-doc" in index
+        assert self.stale_folder_id not in index
+        assert "stale-doc" not in index
+
+    def test_commit_changes_skips_unconfigured_repos_when_config_exists(self):
+        configured_repo = MagicMock()
+        configured_repo.is_dirty.return_value = True
+        configured_repo.untracked_files = []
+        configured_repo.remotes = []
+
+        stale_repo = MagicMock()
+        stale_repo.is_dirty.return_value = True
+        stale_repo.untracked_files = []
+        stale_repo.remotes = []
+
+        self.persistence.git_repos = {
+            f"{self.relay_id}/{self.configured_folder_id}": configured_repo,
+            f"{self.relay_id}/{self.stale_folder_id}": stale_repo,
+        }
+
+        assert self.persistence.commit_changes() is True
+
+        configured_repo.git.add.assert_called_once_with(A=True)
+        configured_repo.index.commit.assert_called_once()
+        stale_repo.git.add.assert_not_called()
+        stale_repo.index.commit.assert_not_called()
+
+    def test_push_all_repos_skips_unconfigured_repos_when_config_exists(self):
+        configured_repo = MagicMock()
+        configured_repo.remotes = [object()]
+        stale_repo = MagicMock()
+        stale_repo.remotes = [object()]
+        self.persistence.git_repos = {
+            f"{self.relay_id}/{self.configured_folder_id}": configured_repo,
+            f"{self.relay_id}/{self.stale_folder_id}": stale_repo,
+        }
+        self.persistence._push_to_remote = MagicMock()
+
+        assert self.persistence.push_all_repos() == 1
+
+        self.persistence._push_to_remote.assert_called_once_with(
+            f"{self.relay_id}/{self.configured_folder_id}", configured_repo
+        )
 
 
 class TestFileOperations:
