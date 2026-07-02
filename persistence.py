@@ -23,7 +23,7 @@ from s3rn import (
     ResourceInterface,
 )
 from models import get_s3rn_resource_category
-from git_config import GitConnectorConfig
+from git_config import GitConnectorConfig, default_git_config_file
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ class PersistenceManager:
         self.git_lock = threading.Lock()  # Prevent concurrent git operations
 
         # Initialize git connector configuration first to get known hosts
-        config_path = git_config_file or os.path.join(self.data_dir, "git_connectors.toml")
+        config_path = default_git_config_file(self.data_dir, git_config_file)
         self.git_config = GitConnectorConfig(config_path)
 
         # Initialize SSH key manager only if SSH_PRIVATE_KEY is set
@@ -669,7 +669,7 @@ class PersistenceManager:
                 # Add .gitignore for content only
                 gitignore_path = os.path.join(folder_path, ".gitignore")
                 with open(gitignore_path, "w") as f:
-                    f.write("# Y-Sweet sync repository - content only\n")
+                    f.write("# Relay sync repository - content only\n")
 
                 self.git_repos[repo_key].index.add([".gitignore"])
                 self.git_repos[repo_key].index.commit("Initial commit")

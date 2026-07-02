@@ -191,7 +191,7 @@ class GitConnectorConfig:
                         prefix=connector_data.get("prefix", ""),
                     )
                     self.connectors.append(connector)
-                    logger.info(
+                    logger.debug(
                         f"Loaded git connector: relay={connector.relay_id}, "
                         f"folder={connector.shared_folder_id}, url={connector.url}"
                     )
@@ -246,10 +246,17 @@ class GitConnectorConfig:
         try:
             # Convert connectors to TOML format
             config_data = {
+                "relay": {
+                    "id": self.relay_id,
+                    "url": self.relay_url,
+                },
+                "webhook": {
+                    "url": self.webhook_url,
+                },
+                "known_hosts": self.known_hosts,
                 "git_connector": [
                     {
                         "shared_folder_id": c.shared_folder_id,
-                        "relay_id": c.relay_id,
                         "url": c.url,
                         "branch": c.branch,
                         "remote_name": c.remote_name,

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class SyncEngine:
-    """Core synchronization logic for Y-Sweet documents to Git repositories"""
+    """Core synchronization logic for Relay documents to Git repositories"""
 
     def __init__(
         self,
