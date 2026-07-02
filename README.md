@@ -4,12 +4,11 @@ A real-time synchronization bridge between Relay Server collaborative documents 
 
 ## What It Does
 
-Relay Server Git Sync monitors collaborative documents in Relay Server and automatically maintains synchronized copies in local Git repositories. When users edit documents in Relay Server, the changes are instantly reflected in the local file system and committed to Git with timestamps.
+Relay Server Git Sync monitors collaborative documents in Relay Server over websocket subscriptions and automatically maintains synchronized copies in local Git repositories. When users edit documents in Relay Server, the changes are reflected in the local file system and committed to Git with timestamps.
 
 ## Key Features
 
-- **Real-time synchronization** - Webhook-driven updates ensure immediate sync
-- **Multi-tenant support** - Handle multiple Relays and Shared Folders simultaneously  
+- **Real-time synchronization** - Websocket subscriptions receive live document updates
 - **Automatic Git versioning** - Timestamped commits preserve change history
 - **Conflict-free operations** - Smart handling of renames, moves, and deletions
 - **Persistent state management** - Maintains sync integrity across restarts
@@ -22,7 +21,7 @@ Relay Server Git Sync monitors collaborative documents in Relay Server and autom
 
 ## How It Works
 
-1. Relay Server sends webhook notifications when documents change
+1. Git Sync subscribes to configured Shared Folders over Relay websocket connections
 2. System analyzes changes and plans sync operations
 3. Files are updated locally with proper conflict resolution
 4. Changes are automatically committed to Git with timestamps
@@ -39,35 +38,105 @@ Use the provided docker container as a starting point.
 docker pull docker.system3.md/relay-git-sync:latest
 ```
 
-### Authentication Setup
+### Git Sync Configuration
 
-The server supports two authentication methods:
+Create `git_connectors.toml` first. This file is the sync plan: each entry maps one
+Shared Folder to one local Git repository. Add `url` when that repository should also
+push to a remote.
 
-#### Method 1: Simple Shared Secret (Recommended)
+```toml
+known_hosts = [
+  "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleHostKey",
+]
 
-For most deployments, use a shared secret for webhook authentication:
+[relay]
+url = "https://your-relay-server.com"
+id = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 
-1. **Generate a shared secret:**
+[[git_connector]]
+shared_folder_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+url = "git@github.com:example/repository.git"
+branch = "main"
+remote_name = "origin"
+prefix = ""  # Optional subdirectory inside the repository
+
+# Local-only snapshots: commits are kept in the local Git repo and are not pushed
+[[git_connector]]
+shared_folder_id = "12345678-1234-5678-9abc-123456789abc"
+prefix = "shared"
+```
+
+Add one `[[git_connector]]` per Shared Folder you want Git Sync to mirror. Omit `url`
+for local-only snapshots.
+
+### Event Transport
+
+Websocket listening is the default transport. Git Sync opens an outbound connection to
+Relay Server and receives change events there. This is the simplest deployment because
+Git Sync does not need to accept inbound connections from Relay Server.
+
+Webhook transport is available when you intentionally deploy Git Sync behind a stable URL
+that Relay Server can reach. Webhooks avoid keeping a long-lived listener connected and
+fit deployments that wake on inbound HTTP requests, but they require network routing from
+Relay Server to Git Sync, TLS, and webhook authentication.
+
+To enable webhook transport, add the exact Git Sync webhook endpoint:
+
+```toml
+[webhook]
+url = "https://your-git-sync-server.com/webhooks"
+```
+
+`git_connectors.toml` stores the webhook endpoint URL. The setup output generates the
+matching `WEBHOOK_SECRET` for the Git Sync runtime environment.
+
+The Relay API key is not scoped to a Shared Folder; it is scoped to the relay prefix, so
+one API key covers the configured Shared Folders for that relay.
+
+Generate the Relay auth setup after the TOML file exists:
 
 ```bash
-openssl rand -base64 32
+uv run git-sync generate-auth
 ```
 
-2. **Set the environment variable:**
+`git-sync setup` is the same command. Git Sync reads `[relay].url`, `[relay].id`,
+and optional `[webhook].url` from `<data-dir>/git_connectors.toml`. Use
+`-c ./path/to/git_connectors.toml` only when the file is somewhere else.
+
+The setup output gives you:
+
+- a `[[auth]]` block for Relay Server `relay.toml`
+- a `RELAY_SERVER_API_KEY` value for Git Sync
+- if `[webhook].url` is configured, a `[[webhooks]]` block and `WEBHOOK_SECRET`
+
+Runtime API keys are only read from `RELAY_SERVER_API_KEY`; do not pass them as command
+arguments when running the server or sync command.
+
+API keys do not expire unless you pass `--expires-days`.
+Use `--json` for machine-readable output.
+Inspect an existing API key with `uv run git-sync inspect-token "$RELAY_SERVER_API_KEY"`.
+Pass `--webhook-url https://your-git-sync-server.com/webhooks` only to override
+`[webhook].url`.
+
+### Webhook Authentication
+
+When `[webhook].url` is configured, the setup output generates a plain shared webhook
+secret. Add the generated `[[webhooks]]` block to Relay Server `relay.toml`, and set the
+generated `WEBHOOK_SECRET` value in the Git Sync deployment.
+
+If `WEBHOOK_SECRET` is unset, `/webhooks` is not mounted.
+
+#### Signed Webhooks (`whsec_*`)
+
+Use this only when your webhook delivery provider signs requests and gives you a `whsec_*`
+signing secret. Native Relay Server webhooks use the generated shared secret above.
+Install the `svix` extra before using that secret format:
 
 ```bash
-export WEBHOOK_SECRET="your-generated-secret"
+uv sync --extra svix
 ```
 
-3. **Configure your webhook provider** with:
-```
-RELAY_SERVER_WEBHOOK_CONFIG=[{"url": "https://your-git-sync-server.com/webhooks", "auth_token": "your-generated-secret" }]
-```
-
-#### Method 2: HMAC Signatures (Webhook Delivery Service)
-
-Use this method if you are using the webhook delivery service (svix).
-To use webhook signatures, use a secret starting with `whsec_`:
+Then configure the signing secret:
 
 ```bash
 export WEBHOOK_SECRET=whsec_your_signing_secret
@@ -92,52 +161,71 @@ export SSH_PRIVATE_KEY="$(cat git_sync_key)"
 View the public key from the private key:
 
 ```bash
-uv run cli.py ssh show-pubkey
+uv run git-sync ssh show-pubkey
 ```
 
 Add the public key to your Git hosting service (GitHub, GitLab, etc.) as a deploy key with write permissions.
 
-### Configuring a Git Remote
-
-Create `git_connectors.toml` in your data directory to configure git repositories:
+For SSH Git remotes, Git Sync also needs host keys for each Git host. Add them to
+top-level `known_hosts` in `git_connectors.toml`:
 
 ```toml
-[[git_connector]]
-shared_folder_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
-relay_id = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
-url = "https://github.com/example/repository.git"
-branch = "main"
-remote_name = "origin"
-prefix = ""  # Optional: subdirectory within repo
+known_hosts = [
+  "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleHostKey",
+  "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleHostKey",
+]
 ```
 
-The system will automatically create repositories and configure remotes on startup.
-
+Get host key lines with `ssh-keyscan <git-host>`, then verify the fingerprint against
+your Git provider before deploying.
 
 ### Running the Server
 
-Start the webhook server:
+Start the server:
 
 ```bash
 # Set required environment variables
-export RELAY_SERVER_URL=https://your-relay-server.com
-export RELAY_SERVER_API_KEY=your-server-api-key        # From System 3 team
-export WEBHOOK_SECRET=whs_...                          # From step 1 above
+export RELAY_SERVER_API_KEY=your-server-api-key        # Generated by the setup output
+export WEBHOOK_SECRET=your-webhook-secret              # Generated by the setup output
 export SSH_PRIVATE_KEY="$(cat git_sync_key)"          # Required for Git push operations
-export RELAY_GIT_DATA_DIR=/path/to/data                # Optional, defaults to current directory
+export RELAY_GIT_DATA_DIR=/path/to/data                # Contains git_connectors.toml
 
 # Start the server
 python app.py --port 8000 --commit-interval 10
+```
+
+The Docker image treats container command arguments as app arguments:
+
+```bash
+docker run \
+  -e RELAY_SERVER_API_KEY="$RELAY_SERVER_API_KEY" \
+  -e WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+  -e SSH_PRIVATE_KEY="$SSH_PRIVATE_KEY" \
+  -v "$PWD/git_connectors.toml:/data/git_connectors.toml:ro" \
+  docker.system3.md/relay-git-sync:latest \
+  --data-dir /data
+```
+
+To generate auth from the container, omit `RELAY_SERVER_API_KEY`. The container reads
+`git_connectors.toml`, prints the setup output, and exits:
+
+```bash
+docker run --rm \
+  -v "$PWD/git_connectors.toml:/data/git_connectors.toml:ro" \
+  docker.system3.md/relay-git-sync:latest \
+  --data-dir /data
 ```
 
 #### Command Line Options
 
 - `--port`: HTTP server port (default: 8000)
 - `--commit-interval`: Git commit interval in seconds (default: 10)
-- `--relay-server-url`: Relay server URL (or set `RELAY_SERVER_URL`)
-- `--relay-server-api-key`: API key for Relay server (or set `RELAY_SERVER_API_KEY`)
+- `--relay-server-url`: Relay server URL override
+- `--relay-id`: Relay UUID override
+- `-c, --config`: Path to `git_connectors.toml` when it is not `<data-dir>/git_connectors.toml`
 - `--data-dir`: Data storage directory (default: from `RELAY_GIT_DATA_DIR` env var or current directory)
-- `--webhook-secret`: Webhook secret (or set `WEBHOOK_SECRET`)
+- `--webhook-secret`: Optional webhook secret (or set `WEBHOOK_SECRET`); enables `/webhooks`
+- `--websocket-reconnect-delay`: Seconds to wait before reconnecting Relay websocket listeners (default: 5)
 
 
 ### Manual Sync
@@ -145,7 +233,8 @@ python app.py --port 8000 --commit-interval 10
 You can also perform one-time syncs within your container by using the CLI:
 
 ```bash
-uv run cli.py sync --relay-id <relay-uuid> --folder-id <folder-uuid>
+export RELAY_SERVER_API_KEY=your-server-api-key
+uv run git-sync sync --folder-id <folder-uuid>
 ```
 
 
@@ -167,7 +256,7 @@ data-dir/
 
 ## API Documentation
 
-The server provides both webhook endpoints for Relay Server integration and public API endpoints for management.
+The server provides public API endpoints for management. The webhook endpoint is only mounted when `WEBHOOK_SECRET` is configured.
 
 **Interactive Documentation:** Visit `/docs` when the server is running for interactive Swagger UI documentation.
 
@@ -178,3 +267,4 @@ The server provides both webhook endpoints for Relay Server integration and publ
 - `GET /api/pubkey` - SSH public key retrieval (public)
 - `GET /docs` - Interactive API documentation (public)
 - `GET /openapi.yaml` - OpenAPI specification (public)
+- `POST /webhooks` - Optional webhook ingestion, mounted only when `WEBHOOK_SECRET` is set

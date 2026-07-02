@@ -198,12 +198,12 @@ def api_token_create_command(args):
 
         if not jwt_secret:
             print("Error: JWT_SECRET environment variable is required to create API tokens.")
-            print("Run: python cli.py api keygen")
+            print("Run: git-sync api keygen")
             return 1
 
         if not jwt_secret.startswith("sk_"):
             print("Error: JWT_SECRET must start with 'sk_' prefix.")
-            print("Run: python cli.py api keygen")
+            print("Run: git-sync api keygen")
             return 1
 
         token = create_jwt_token(jwt_secret, "api", args.expires, args.name)
@@ -496,20 +496,21 @@ Examples:
   git-sync generate-auth
 
   # Git connector management
-  python cli.py git init
-  python cli.py git list
-  python cli.py git add --relay-id abc123... --folder-id def456... --url https://github.com/user/repo.git --prefix docs
-  python cli.py git sync  # Create repos from TOML config
+  git-sync git init
+  git-sync git list
+  git-sync git add --folder-id def456... --url https://github.com/user/repo.git --prefix docs
+  git-sync git add --folder-id def456... --prefix shared  # local-only snapshots
+  git-sync git sync  # Create repos from TOML config
 
-  # Webhook authentication (shared secret or Svix HMAC only)
-  python cli.py webhook keygen
+  # Webhook authentication
+  git-sync webhook keygen
 
   # API authentication (JWT tokens only)
-  python cli.py api keygen
-  python cli.py api token create --name "deploy-script"
+  git-sync api keygen
+  git-sync api token create --name "deploy-script"
 
   # SSH key management
-  python cli.py ssh show-pubkey
+  git-sync ssh show-pubkey
 
 Authentication Methods:
   Relay:    setup command generates RELAY_SERVER_API_KEY

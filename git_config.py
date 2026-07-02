@@ -322,17 +322,36 @@ class GitConnectorConfig:
         example_content = """# Git Connector Configuration
 # Configure git repositories to sync with shared folders
 
+# SSH known host keys for Git providers used by SSH Git URLs.
+# Add every SSH Git host you use here. Get lines with `ssh-keyscan <git-host>`
+# and verify the fingerprint against your Git provider before deploying.
+# known_hosts = [
+#     "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+#     "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+# ]
+
+[relay]
+id = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+url = "https://your-relay-server.com"
+
+# Optional: only needed when Relay Server should POST webhooks to Git Sync.
+# [webhook]
+# url = "https://your-git-sync-server.com/webhooks"
+
 [[git_connector]]
 shared_folder_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
-relay_id = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 url = "https://github.com/example/repository.git"
 branch = "main"
 remote_name = "origin"
 prefix = ""  # Optional: subdirectory within repo (e.g., "docs" or "content/posts")
 
+# Local-only snapshot repository: commits locally without pushing to a remote
 # [[git_connector]]
 # shared_folder_id = "another-folder-uuid"
-# relay_id = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+# prefix = "snapshots"
+
+# [[git_connector]]
+# shared_folder_id = "another-folder-uuid"
 # url = "git@github.com:example/private-repo.git"
 # branch = "develop"
 # remote_name = "origin"
