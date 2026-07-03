@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import os
 import logging
 import re
@@ -46,13 +47,51 @@ def ssh_host_from_git_url(url: str) -> Optional[str]:
     return None
 
 
+def _known_hosts_cache_path(config_file: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(config_file)), ".known_hosts_cache.json")
+
+
+def _load_known_hosts_cache(cache_path: str) -> Dict[str, List[str]]:
+    try:
+        with open(cache_path, "r") as f:
+            cache = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logger.warning(f"Ignoring unreadable known_hosts cache {cache_path}: {e}")
+        return {}
+
+    if not isinstance(cache, dict):
+        return {}
+    return {
+        host: entries
+        for host, entries in cache.items()
+        if isinstance(host, str)
+        and isinstance(entries, list)
+        and all(isinstance(entry, str) for entry in entries)
+    }
+
+
+def _save_known_hosts_cache(cache_path: str, cache: Dict[str, List[str]]) -> None:
+    try:
+        temp_path = f"{cache_path}.tmp"
+        with open(temp_path, "w") as f:
+            json.dump(cache, f, indent=2)
+        os.replace(temp_path, cache_path)
+    except Exception as e:
+        logger.warning(f"Could not write known_hosts cache {cache_path}: {e}")
+
+
 def _known_hosts_entries_for_urls(
     urls: List[str],
     explicit_known_hosts: List[str],
+    cache_path: Optional[str] = None,
 ) -> Tuple[List[str], Dict[str, str]]:
     entries: List[str] = []
     errors: Dict[str, str] = {}
     fetched_hosts = set()
+    cache = _load_known_hosts_cache(cache_path) if cache_path else {}
+    cache_dirty = False
     for url in urls:
         host = ssh_host_from_git_url(url)
         if (
@@ -65,9 +104,25 @@ def _known_hosts_entries_for_urls(
 
         fetched_hosts.add(host)
         try:
-            entries.extend(fetch_known_hosts_for_host(host))
+            host_entries = fetch_known_hosts_for_host(host)
         except KnownHostKeyFetchError as e:
-            errors[host] = str(e)
+            # Fall back to the last successfully fetched keys so a provider
+            # outage or rate limit does not prevent startup.
+            cached_entries = cache.get(host, [])
+            if known_hosts_cover_host(cached_entries, host):
+                logger.warning(f"Using cached known_hosts for {host} after fetch failure: {e}")
+                entries.extend(cached_entries)
+            else:
+                errors[host] = str(e)
+            continue
+
+        entries.extend(host_entries)
+        if cache.get(host) != host_entries:
+            cache[host] = host_entries
+            cache_dirty = True
+
+    if cache_path and cache_dirty:
+        _save_known_hosts_cache(cache_path, cache)
 
     return dedupe_preserving_order(entries), errors
 
@@ -260,6 +315,7 @@ class GitConnectorConfig:
             inferred_known_hosts, self.known_hosts_fetch_errors = _known_hosts_entries_for_urls(
                 [connector.url for connector in self.connectors],
                 self.explicit_known_hosts,
+                cache_path=_known_hosts_cache_path(self.config_file),
             )
             self.known_hosts = dedupe_preserving_order(
                 self.explicit_known_hosts + inferred_known_hosts

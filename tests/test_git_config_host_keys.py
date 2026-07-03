@@ -110,6 +110,33 @@ url = "git@github.com:example/repository.git"
             "github.com: provider endpoint unavailable"
         ]
 
+    def test_hosted_provider_fetch_failure_falls_back_to_cached_known_hosts(self, monkeypatch):
+        cached_entry = "github.com ssh-ed25519 AAAACachedHostKey"
+        config_body = f"""
+[relay]
+id = "{self.relay_id}"
+url = "https://auth.system3.dev"
+
+[[git_connector]]
+shared_folder_id = "{self.folder_id}"
+url = "git@github.com:example/repository.git"
+"""
+
+        # First load succeeds and populates the on-disk cache.
+        monkeypatch.setattr("git_config.fetch_known_hosts_for_host", lambda host: [cached_entry])
+        config_path = self._write_config(config_body)
+        assert GitConnectorConfig(config_path).validate_config() == []
+
+        # Second load fails to fetch but recovers from the cache.
+        def fail_fetch_known_hosts(host):
+            raise KnownHostKeyFetchError("provider endpoint unavailable")
+
+        monkeypatch.setattr("git_config.fetch_known_hosts_for_host", fail_fetch_known_hosts)
+        config = GitConnectorConfig(config_path)
+
+        assert config.validate_config() == []
+        assert config.known_hosts == [cached_entry]
+
     def test_https_and_local_connectors_do_not_add_known_hosts(self):
         config_path = self._write_config(
             f"""
