@@ -225,6 +225,9 @@ if __name__ == "__main__":
     relay_server_api_key = os.getenv("RELAY_SERVER_API_KEY")
 
     if not relay_server_api_key:
+        # Setup mode: print auth setup instructions and exit cleanly. A nonzero
+        # exit would crash-loop under restart policies, minting a fresh keypair
+        # on every restart.
         run_server(
             args.relay_server_url,
             relay_server_api_key,
@@ -236,7 +239,8 @@ if __name__ == "__main__":
             args.websocket_reconnect_delay,
             relay_id=args.relay_id,
         )
-        exit(1)
+        print("Set RELAY_SERVER_API_KEY and restart to begin syncing.")
+        exit(0)
 
     # Check for SSH key (warn if missing, don't fail)
     if not os.getenv("SSH_PRIVATE_KEY"):
