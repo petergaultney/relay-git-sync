@@ -505,7 +505,7 @@ class PersistenceManager:
             if "Could not read from remote repository" in str(e.stderr):
                 logger.error("This appears to be an SSH authentication error.")
                 logger.error("Possible causes:")
-                logger.error("  1. SSH private key not properly loaded into ssh-agent")
+                logger.error("  1. SSH private key file not properly written from SSH_PRIVATE_KEY")
                 logger.error("  2. SSH public key not added to the Git hosting service")
                 logger.error("  3. Repository URL is incorrect")
                 logger.error("  4. Network connectivity issues")
