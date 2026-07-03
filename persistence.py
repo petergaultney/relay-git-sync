@@ -590,26 +590,37 @@ class PersistenceManager:
         with self.resource_index_lock:
             self._build_resource_index(relay_id)
 
+    def _write_json_atomic(self, path: str, data: Any):
+        """Write JSON to a temp file and rename it into place so readers and
+        crash recovery never observe a partially written state file."""
+        temp_path = f"{path}.tmp"
+        with open(temp_path, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_path, path)
+
     def save_persistent_data(self, relay_id: str):
         """Save document hashes, filemeta, and local state for a specific relay"""
         # Ensure state directory exists
         os.makedirs(self.get_state_dir(relay_id), exist_ok=True)
 
         try:
-            with open(self.get_hashes_file_path(relay_id), "w") as f:
-                json.dump(self.document_hashes.get(relay_id, {}), f, indent=2)
+            self._write_json_atomic(
+                self.get_hashes_file_path(relay_id), self.document_hashes.get(relay_id, {})
+            )
         except Exception as e:
             logger.error(f"Error saving document hashes for relay {relay_id}: {e}")
 
         try:
-            with open(self.get_filemeta_file_path(relay_id), "w") as f:
-                json.dump(self.filemeta_folders.get(relay_id, {}), f, indent=2)
+            self._write_json_atomic(
+                self.get_filemeta_file_path(relay_id), self.filemeta_folders.get(relay_id, {})
+            )
         except Exception as e:
             logger.error(f"Error saving filemeta for relay {relay_id}: {e}")
 
         try:
-            with open(self.get_local_state_file_path(relay_id), "w") as f:
-                json.dump(self.local_file_state.get(relay_id, {}), f, indent=2)
+            self._write_json_atomic(
+                self.get_local_state_file_path(relay_id), self.local_file_state.get(relay_id, {})
+            )
         except Exception as e:
             logger.error(f"Error saving local state for relay {relay_id}: {e}")
 
