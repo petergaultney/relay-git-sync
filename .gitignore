@@ -1,4 +1,7 @@
 *.pyc
+*.egg-info/
+git_connectors.toml
+.known_hosts_cache.json
 relay_sdk/*
 !relay_sdk/
 !relay_sdk/*.py
