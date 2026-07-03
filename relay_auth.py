@@ -30,7 +30,23 @@ CWT_CLAIM_SCOPE = -80201
 
 DEFAULT_ISSUER = "relay-server"
 KEY_ID_PREFIX = "git-sync"
-SETUP_TEMPLATE = Path(__file__).with_name("templates") / "relay_auth_setup.md"
+
+
+def _setup_template_path() -> Path:
+    # Running from a checkout (or editable install): templates/ sits next to
+    # this module. From a wheel install, [tool.setuptools.data-files] places
+    # it under sys.prefix instead of site-packages.
+    candidates = [
+        Path(__file__).with_name("templates") / "relay_auth_setup.md",
+        Path(sys.prefix) / "templates" / "relay_auth_setup.md",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+SETUP_TEMPLATE = _setup_template_path()
 
 
 @dataclass(frozen=True)
