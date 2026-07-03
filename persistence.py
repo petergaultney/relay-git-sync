@@ -137,11 +137,14 @@ class PersistenceManager:
     FILEMETA_FILE = "shared_folders.json"
     MIRROR_BASE_DIR = "repos"
     LOCAL_STATE_FILE = "local_state.json"
+    UNPUSHED_CHECK_FETCH_INTERVAL_SECONDS = 300
 
     def __init__(self, data_dir: str = ".", git_config_file: Optional[str] = None):
         self.data_dir = data_dir
         self.git_repos: Dict[str, git.Repo] = {}  # Now keyed by "relay_id/folder_id"
         self.git_lock = threading.Lock()  # Prevent concurrent git operations
+        # Last fetch time per repo for the unpushed-commit check, keyed by repo_key
+        self._unpushed_check_fetch_times: Dict[str, float] = {}
 
         # Initialize git connector configuration first to get known hosts
         config_path = default_git_config_file(self.data_dir, git_config_file)
@@ -846,15 +849,22 @@ class PersistenceManager:
 
         tracking_branch = current_branch.tracking_branch()
         if tracking_branch is None:
+            # This runs on every commit tick; without an upstream it needs a network
+            # fetch, so rate-limit the fetch to avoid hammering the remote when the
+            # tracking branch cannot be repaired (e.g. remote branch does not exist).
+            now = time.monotonic()
+            last_fetch = self._unpushed_check_fetch_times.get(repo_key, 0.0)
+            if now - last_fetch < self.UNPUSHED_CHECK_FETCH_INTERVAL_SECONDS:
+                return False
+            self._unpushed_check_fetch_times[repo_key] = now
+
             remote = (
                 git_repo.remotes.origin
                 if "origin" in [r.name for r in git_repo.remotes]
                 else git_repo.remotes[0]
             )
             self._safe_git_fetch_with_debug(remote, repo_key)
-            tracking_branch = self._repair_tracking_branch_if_obvious(
-                repo_key, git_repo, remote
-            )
+            tracking_branch = self._repair_tracking_branch_if_obvious(repo_key, git_repo, remote)
 
         if tracking_branch is None:
             remote_name = (
