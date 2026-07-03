@@ -148,8 +148,12 @@ class WebsocketChangeListener:
             logger.debug("Failed to refresh subdoc query for folder=%s", folder_id, exc_info=True)
 
     def _known_subdoc_guids(self, relay_id: str, folder_id: str) -> List[str]:
-        self.persistence_manager.load_persistent_data(relay_id)
-        filemeta = self.persistence_manager.filemeta_folders.get(relay_id, {}).get(folder_id, {})
+        # Read in-memory state only: reloading from disk here would race with the
+        # operations-queue worker, which owns load/mutate/save of this state.
+        # Copy the folder dict so iteration is safe while the worker updates it.
+        filemeta = dict(
+            self.persistence_manager.filemeta_folders.get(relay_id, {}).get(folder_id, {})
+        )
         guids: List[str] = []
         prefix = f"{relay_id}-"
 

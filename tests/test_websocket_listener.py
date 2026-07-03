@@ -36,7 +36,9 @@ def test_known_subdoc_guids_match_relay_provider_shape():
 
     guids = listener._known_subdoc_guids(RELAY_ID, FOLDER_ID)
 
-    persistence.load_persistent_data.assert_called_once_with(RELAY_ID)
+    # Must not reload persisted state from listener threads: that would race with
+    # the operations-queue worker, which owns load/mutate/save of this state.
+    persistence.load_persistent_data.assert_not_called()
     assert guids == [
         f"{RELAY_ID}-{DOC_ID}",
         f"{RELAY_ID}-aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
