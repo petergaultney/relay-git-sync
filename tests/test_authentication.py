@@ -149,6 +149,26 @@ def test_svix_webhook_auth_fails_cleanly_without_optional_dependency(monkeypatch
     assert "git-sync[svix]" in response.json()["error"]
 
 
+def test_default_reject_distinguishes_router_404_from_endpoint_404():
+    # No auth decorator: a registered endpoint answering 404 must still be
+    # rejected for missing auth config; only router 404s for unregistered
+    # paths pass through.
+    async def missing_resource_endpoint(request: Request):
+        return JSONResponse({"error": "resource not found"}, status_code=404)
+
+    app = Starlette(
+        routes=[Route("/resource", missing_resource_endpoint, methods=["GET"])],
+        middleware=[
+            Middleware(AuthMiddleware, webhook_secret="test_shared_secret_123"),
+            Middleware(DefaultRejectMiddleware),
+        ],
+    )
+    client = TestClient(app)
+
+    assert client.get("/does-not-exist").status_code == 404
+    assert client.get("/resource").status_code == 401
+
+
 def test_secret_generation():
     """Test webhook secret generation and character safety"""
 

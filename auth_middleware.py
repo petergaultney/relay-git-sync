@@ -6,6 +6,7 @@ from functools import wraps
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.requests import Request
+from starlette.routing import Match
 from jwt_auth import JWTValidator
 
 try:
@@ -19,10 +20,24 @@ logger = logging.getLogger(__name__)
 class DefaultRejectMiddleware(BaseHTTPMiddleware):
     """Middleware to enforce default reject pattern"""
 
+    @staticmethod
+    def _matches_registered_route(request) -> bool:
+        app = request.scope.get("app")
+        routes = getattr(app, "routes", None) or []
+        for route in routes:
+            match, _ = route.matches(request.scope)
+            if match is not Match.NONE:
+                return True
+        return False
+
     async def dispatch(self, request, call_next):
         response = await call_next(request)
 
-        if getattr(response, "status_code", None) == 404:
+        # Let router 404s for unregistered paths through unauthenticated, but a
+        # registered endpoint answering 404 must still carry explicit auth config.
+        if getattr(response, "status_code", None) == 404 and not self._matches_registered_route(
+            request
+        ):
             return response
 
         # Check if endpoint lacks explicit auth configuration
