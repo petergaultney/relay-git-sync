@@ -2,6 +2,7 @@
 
 import os
 import hashlib
+import json
 import time
 import threading
 import logging
@@ -23,6 +24,25 @@ from s3rn import S3RNType, S3RN, S3RemoteFolder, S3RemoteDocument, S3RemoteFile,
 
 logger = logging.getLogger(__name__)
 
+# Burst thresholds mirror the Relay plugin's DeleteCollector
+# (relay/src/folder-hsm/delete-collector.ts): destructive bursts above
+# max(10% of membership, 25) are gated instead of applied.
+MASS_CHANGE_THRESHOLD_FRACTION = 0.1
+MASS_CHANGE_THRESHOLD_FLOOR = 25
+
+# What fetch_canvas_content returns for a canvas whose CRDT was emptied.
+EMPTY_CANVAS_CONTENT = json.dumps({"edges": [], "nodes": []}, indent=2, sort_keys=True)
+
+
+def mass_change_threshold(membership_size: int) -> int:
+    return max(int(MASS_CHANGE_THRESHOLD_FRACTION * membership_size), MASS_CHANGE_THRESHOLD_FLOOR)
+
+
+def allow_mass_delete() -> bool:
+    """Operator override releasing a gated deletion burst, the mirror analog
+    of the plugin's explicit send-held-deletions user decision."""
+    return os.getenv("RELAY_GIT_ALLOW_MASS_DELETE") == "1"
+
 
 class SyncEngine:
     """Core synchronization logic for Relay documents to Git repositories"""
@@ -37,6 +57,9 @@ class SyncEngine:
         self.relay_client = relay_client
         self.persistence_manager = persistence_manager or PersistenceManager(data_dir)
         self.folder_sync_locks: Dict[str, threading.Lock] = {}
+        # Per-folder truncation budgets for the current sync pass, keyed by
+        # folder_uuid: {"applied": int, "limit": int}
+        self._truncation_gates: Dict[str, Dict[str, int]] = {}
 
     def process_document_change(
         self, relay_id: str, resource_id: str, timestamp: datetime
@@ -375,6 +398,27 @@ class SyncEngine:
         # Prevent concurrent syncs for this folder
         with folder_lock:
             try:
+                membership_size = self._file_entry_count(new_filemeta)
+                local_file_count = self._local_file_count(relay_id, folder_uuid)
+
+                # Publication rule (relay/src/folder-hsm/bridge.ts): a wholly
+                # empty remote map against non-empty local membership is a
+                # publication, re-share, or server reset — never a mass
+                # deletion. The plugin uploads local content; a read-only
+                # mirror can only refuse to act.
+                if membership_size == 0 and local_file_count > 0:
+                    logger.error(
+                        f"Refusing to sync folder {folder_uuid}: remote filemeta has no file "
+                        f"entries while {local_file_count} local files exist. This is a "
+                        f"publication/reset state, not a mass deletion."
+                    )
+                    return []
+
+                self._truncation_gates[folder_uuid] = {
+                    "applied": 0,
+                    "limit": mass_change_threshold(membership_size),
+                }
+
                 operations = []
                 diff_log = []
 
@@ -415,6 +459,19 @@ class SyncEngine:
                 deletes = self.cleanup_extra_local_files(
                     relay_id, folder_resource, new_filemeta, remote_paths, diff_log
                 )
+
+                # Gate deletion bursts (DeleteCollector analog): absence from
+                # one filemeta snapshot is weak evidence, so a burst above the
+                # threshold is held instead of applied.
+                delete_threshold = mass_change_threshold(membership_size)
+                if len(deletes) > delete_threshold and not allow_mass_delete():
+                    logger.error(
+                        f"Gating deletion burst for folder {folder_uuid}: {len(deletes)} "
+                        f"deletions exceeds threshold {delete_threshold} for membership "
+                        f"of {membership_size}. No files deleted. Set "
+                        f"RELAY_GIT_ALLOW_MASS_DELETE=1 and re-sync to apply."
+                    )
+                    deletes = []
                 operations.extend(deletes)
 
                 # Execute all operations
@@ -434,6 +491,60 @@ class SyncEngine:
                 logger.error(f"Error syncing folder {folder_uuid}: {e}")
                 logger.error(f"Folder sync traceback: {traceback.format_exc()}")
                 return []
+            finally:
+                self._truncation_gates.pop(folder_uuid, None)
+
+    def _file_entry_count(self, filemeta: Dict) -> int:
+        return sum(
+            1
+            for metadata in filemeta.values()
+            if isinstance(metadata, dict) and "id" in metadata and metadata.get("type") != "folder"
+        )
+
+    def _local_file_count(self, relay_id: str, folder_uuid: str) -> int:
+        folder_path = self.persistence_manager.get_folder_path_with_prefix(relay_id, folder_uuid)
+        if not os.path.exists(folder_path):
+            return 0
+        count = 0
+        for root, dirs, files in os.walk(folder_path):
+            if ".git" in dirs:
+                dirs.remove(".git")
+            count += sum(1 for f in files if not f.startswith(".git"))
+        return count
+
+    def _gates_truncation(self, relay_id: str, operation: SyncOperation) -> bool:
+        """Budget non-empty -> empty overwrites during a folder sync pass.
+
+        A single truncation is authoritative (the doc's CRDT has history and
+        was genuinely emptied), but a burst of them is upstream poison — e.g.
+        every doc emptied by a botched re-share — that a mirror must not
+        engrave into files. Returns True when the operation must be skipped.
+        """
+        folder_uuid = S3RN.get_folder_id(operation.folder_resource)
+        gate = self._truncation_gates.get(folder_uuid)
+        if gate is None:
+            # Single-document event outside a folder pass: allow.
+            return False
+
+        folder_path = self.persistence_manager.get_folder_path_with_prefix(relay_id, folder_uuid)
+        full_path = self.persistence_manager._sanitize_path(operation.path, folder_path)
+        try:
+            if not os.path.exists(full_path) or os.path.getsize(full_path) == 0:
+                return False
+        except OSError:
+            return False
+
+        if gate["applied"] >= gate["limit"]:
+            operation.error = "Truncation burst gated: refusing to empty another non-empty file"
+            logger.error(
+                f"Gating truncation burst for folder {folder_uuid}: more than "
+                f"{gate['limit']} non-empty files would be emptied in one sync pass. "
+                f"Skipping {operation.path}."
+            )
+            return True
+
+        gate["applied"] += 1
+        return False
 
     def sync_by_type(
         self,
@@ -718,6 +829,9 @@ class SyncEngine:
             if content is None:
                 content = self.relay_client.fetch_canvas_content(document_resource)
 
+            if content == EMPTY_CANVAS_CONTENT and self._gates_truncation(relay_id, operation):
+                return
+
             if content is not None:
                 # Write canvas JSON using persistence manager
                 file_hash = operation.metadata.get("hash") if operation.metadata else None
@@ -734,6 +848,9 @@ class SyncEngine:
             content = operation.content
             if content is None:
                 content = self.relay_client.fetch_document_content(document_resource)
+
+            if content == "" and self._gates_truncation(relay_id, operation):
+                return
 
             if content is not None:
                 # Write file using persistence manager
