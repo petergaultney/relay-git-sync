@@ -946,7 +946,9 @@ class SyncEngine:
 
         if metadata_type == "folder":
             return SyncType.FOLDER
-        elif metadata_type == "document":
+        elif metadata_type in ("document", "markdown"):
+            # Real Relay filemeta uses "markdown"; "document" is kept for
+            # older entries and internal fixtures.
             return SyncType.DOCUMENT
         elif metadata_type == "canvas":
             return SyncType.CANVAS
