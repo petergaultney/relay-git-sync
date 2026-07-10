@@ -6,6 +6,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a real-time synchronization bridge between Relay Server collaborative documents and Git repositories. The system monitors collaborative documents via webhooks and maintains synchronized copies in local Git repositories with automatic version control.
 
+## Data-Safety Invariants
+
+This mirror follows the sync-safety principles of the Relay plugin
+(`~/stash/relay/specs/folder-hsm.md`) and relay-cli
+(`~/stash/relay-cli/specs/folder-sync.md`). Any change to sync behavior must
+preserve them:
+
+1. **Absent evidence means preserve, never trash.** The absence of a filemeta
+   entry in one snapshot is not proof of deletion (spec P2/P4). Deletion
+   bursts above `max(10% of membership, 25)` are gated, not applied
+   (`RELAY_GIT_ALLOW_MASS_DELETE=1` releases a gate after review).
+2. **An empty state vector means unsynced, not empty.** A Y-Doc that decodes
+   to zero clients was never written: the server has the guid registered but
+   no content was uploaded yet (plugin `isEmptyDoc`/`downloadByGuid`;
+   BUG-229 cross-relay re-shares). Fetches defer; they never wipe files.
+3. **A genuinely emptied doc (history present, empty text) is authoritative
+   for one file, suspicious in bulk.** Truncation bursts above the same
+   threshold are gated per sync pass.
+4. **A wholly-empty remote map against non-empty local files is a
+   publication/reset, never a mass deletion** (plugin `folder-hsm/bridge.ts`
+   publication rule). The mirror refuses to act on it.
+5. **Deletes must stay recoverable.** Deletions are regular commits — never
+   force-push, so git history is the trash (spec P5 analog).
+6. **Filemeta carries no content hash for markdown/canvas** — content and
+   emptiness live only in the per-document Y-Doc. Never infer document
+   content state from filemeta.
+
 ## Key Architecture
 
 The codebase follows a modular architecture with clear separation of concerns:
