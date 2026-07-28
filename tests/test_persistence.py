@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 
-import os
-import tempfile
-import shutil
 import json
-import pytest
+import os
+import shutil
+import tempfile
+from unittest.mock import MagicMock, mock_open, patch
+
 import git
-from unittest.mock import patch, MagicMock, mock_open
+import pytest
+
 from persistence import PersistenceManager, SSHKeyManager
-from s3rn import S3RemoteFolder, S3RemoteDocument, S3RemoteCanvas, S3RemoteFile
+from s3rn import S3RemoteCanvas, S3RemoteDocument, S3RemoteFile, S3RemoteFolder
 
 
 class TestPathSanitization:
@@ -46,9 +48,7 @@ class TestPathSanitization:
     def test_sanitize_path_allows_dots_in_filenames(self):
         """Test that filenames containing '..' are allowed (not traversal)"""
         # Ellipsis in filename should not trigger traversal check
-        result = self.persistence._sanitize_path(
-            "folder/file with dots....md", self.base_dir
-        )
+        result = self.persistence._sanitize_path("folder/file with dots....md", self.base_dir)
         assert result.endswith("folder/file with dots....md")
 
     def test_sanitize_path_blocks_escape_attempts(self):
@@ -226,6 +226,7 @@ class TestResourceIndexManagement:
 
 class TestConfiguredFolderGuardrails:
     relay_id = "85a06712-af14-47bc-a859-e8106cc786e8"
+    other_relay_id = "3017ef4d-9b10-48f9-a52e-12f48331e21d"
     configured_folder_id = "3667fcda-755e-472b-abea-4b4fc96873a9"
     stale_folder_id = "bcb3e341-6ddf-4a3d-9e8f-8fc3773cd49f"
 
@@ -255,9 +256,7 @@ prefix = "notes"
 
     def test_resource_index_ignores_unconfigured_persisted_folders(self):
         self.persistence.filemeta_folders[self.relay_id] = {
-            self.configured_folder_id: {
-                "/home.md": {"id": "configured-doc", "type": "document"}
-            },
+            self.configured_folder_id: {"/home.md": {"id": "configured-doc", "type": "document"}},
             self.stale_folder_id: {"/old.md": {"id": "stale-doc", "type": "document"}},
         }
         self.persistence.local_file_state[self.relay_id] = {
@@ -284,6 +283,29 @@ prefix = "notes"
         assert "configured-doc" in index
         assert self.stale_folder_id not in index
         assert "stale-doc" not in index
+
+    def test_configured_connectors_reject_folders_from_other_relays(self):
+        self.persistence.filemeta_folders[self.other_relay_id] = {
+            self.stale_folder_id: {"/private.md": {"id": "other-relay-doc", "type": "document"}}
+        }
+        self.persistence.local_file_state[self.other_relay_id] = {
+            self.stale_folder_id: {
+                "/private.md": {
+                    "doc_id": "other-relay-doc",
+                    "type": "document",
+                    "hash": "other-relay-hash",
+                }
+            }
+        }
+        self.persistence.document_hashes[self.other_relay_id] = {
+            "other-relay-doc": "other-relay-hash"
+        }
+
+        assert not self.persistence.should_sync_folder(self.other_relay_id, self.stale_folder_id)
+
+        self.persistence._build_resource_index(self.other_relay_id)
+
+        assert self.persistence.resource_index[self.other_relay_id] == {}
 
     def test_commit_changes_skips_unconfigured_repos_when_config_exists(self):
         configured_repo = MagicMock()
@@ -558,6 +580,16 @@ class TestPersistentDataManagement:
         # Check data was restored
         assert self.persistence.document_hashes[self.relay_id] == test_hashes
 
+    def test_save_and_load_subdoc_heads(self):
+        test_heads = {"doc-123": "head123", "doc-456": "head456"}
+        self.persistence.subdoc_heads[self.relay_id] = test_heads
+
+        self.persistence.save_persistent_data(self.relay_id)
+        self.persistence.subdoc_heads[self.relay_id] = {}
+        self.persistence.load_persistent_data(self.relay_id)
+
+        assert self.persistence.subdoc_heads[self.relay_id] == test_heads
+
     def test_save_and_load_filemeta(self):
         """Test saving and loading filemeta"""
         test_filemeta = {"folder-789": {"/test.md": {"id": "doc-123", "type": "document"}}}
@@ -577,11 +609,13 @@ class TestPersistentDataManagement:
 
         # Check empty structures were created
         assert self.relay_id in self.persistence.document_hashes
+        assert self.relay_id in self.persistence.subdoc_heads
         assert self.relay_id in self.persistence.filemeta_folders
         assert self.relay_id in self.persistence.local_file_state
         assert self.relay_id in self.persistence.resource_index
 
         assert self.persistence.document_hashes[self.relay_id] == {}
+        assert self.persistence.subdoc_heads[self.relay_id] == {}
         assert self.persistence.filemeta_folders[self.relay_id] == {}
         assert self.persistence.local_file_state[self.relay_id] == {}
 
@@ -670,9 +704,9 @@ class TestSSHKeyManager:
         self.temp_dir = tempfile.mkdtemp()
 
         # Generate a test key for testing
+        from cryptography.hazmat.backends import default_backend
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.hazmat.backends import default_backend
 
         # Generate test private key
         private_key = rsa.generate_private_key(
@@ -875,9 +909,9 @@ class TestOutOfBandPushRecovery:
             with open(os.path.join(self.mine_path, f"mine-{n}.md"), "w") as f:
                 f.write("mine\n")
             assert self.pm.commit_changes()
-            assert self._reached_remote(self.mine.head.commit.hexsha), (
-                f"cycle {n}: connector commit never reached the remote"
-            )
+            assert self._reached_remote(
+                self.mine.head.commit.hexsha
+            ), f"cycle {n}: connector commit never reached the remote"
 
     def test_rejected_push_triggers_recovery(self):
         # A commit already created on a stale parent: the race window where the
@@ -890,9 +924,9 @@ class TestOutOfBandPushRecovery:
 
         self.pm._push_to_remote(self.repo_key, self.mine)
 
-        assert self._reached_remote(self.mine.head.commit.hexsha), (
-            "rejected push was not recovered (rebase + re-push)"
-        )
+        assert self._reached_remote(
+            self.mine.head.commit.hexsha
+        ), "rejected push was not recovered (rebase + re-push)"
 
     def test_configure_remote_repairs_obvious_missing_upstream(self):
         self._unset_upstream(self.mine)
@@ -918,9 +952,9 @@ class TestOutOfBandPushRecovery:
         self.pm._push_to_remote(self.repo_key, self.mine)
 
         assert self.mine.active_branch.tracking_branch().name == "origin/main"
-        assert self._reached_remote(self.mine.head.commit.hexsha), (
-            "missing-upstream push was not repaired and recovered"
-        )
+        assert self._reached_remote(
+            self.mine.head.commit.hexsha
+        ), "missing-upstream push was not repaired and recovered"
 
     def test_missing_upstream_repair_fetches_remote_branch_first(self):
         self._unset_upstream(self.mine)
@@ -937,9 +971,9 @@ class TestOutOfBandPushRecovery:
         self.pm._push_to_remote(self.repo_key, self.mine)
 
         assert self.mine.active_branch.tracking_branch().name == "origin/main"
-        assert self._reached_remote(self.mine.head.commit.hexsha), (
-            "missing remote-tracking ref was not fetched before upstream repair"
-        )
+        assert self._reached_remote(
+            self.mine.head.commit.hexsha
+        ), "missing remote-tracking ref was not fetched before upstream repair"
 
     def test_push_and_verify_raises_on_rejection(self):
         self._other_pushes("racing.md")

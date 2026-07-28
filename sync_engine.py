@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 
-import os
 import hashlib
 import json
-import time
-import threading
 import logging
+import os
+import threading
+import time
 import traceback
+from collections import deque
 from datetime import datetime, timezone
-from typing import List, Dict, Optional, Any, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
+
 from pycrdt import Map
+
 from models import (
-    SyncOperation,
-    SyncType,
     OperationType,
+    SyncOperation,
     SyncRequest,
     SyncResult,
+    SyncType,
     create_document_resource_from_metadata,
 )
-from relay_client import RelayClient
 from persistence import PersistenceManager
-from s3rn import S3RNType, S3RN, S3RemoteFolder, S3RemoteDocument, S3RemoteFile, S3RemoteCanvas
+from relay_client import RelayClient
+from s3rn import S3RN, S3RemoteCanvas, S3RemoteDocument, S3RemoteFile, S3RemoteFolder, S3RNType
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,7 @@ logger = logging.getLogger(__name__)
 # max(10% of membership, 25) are gated instead of applied.
 MASS_CHANGE_THRESHOLD_FRACTION = 0.1
 MASS_CHANGE_THRESHOLD_FLOOR = 25
+TRUNCATION_EVENT_WINDOW_SECONDS = 60.0
 
 # What fetch_canvas_content returns for a canvas whose CRDT was emptied.
 EMPTY_CANVAS_CONTENT = json.dumps({"edges": [], "nodes": []}, indent=2, sort_keys=True)
@@ -57,12 +61,21 @@ class SyncEngine:
         self.relay_client = relay_client
         self.persistence_manager = persistence_manager or PersistenceManager(data_dir)
         self.folder_sync_locks: Dict[str, threading.Lock] = {}
-        # Per-folder truncation budgets for the current sync pass, keyed by
-        # folder_uuid: {"applied": int, "limit": int}
-        self._truncation_gates: Dict[str, Dict[str, int]] = {}
+        # Per-folder truncation budgets for the current sync pass.
+        self._truncation_gates: Dict[Tuple[str, str], Dict[str, int]] = {}
+        # Websocket document events arrive outside folder passes. Track their
+        # destructive writes in a rolling window so a burst cannot bypass the
+        # per-pass gate one document at a time.
+        self._recent_truncations: Dict[Tuple[str, str], Deque[float]] = {}
+        self._truncation_gate_lock = threading.Lock()
 
     def process_document_change(
-        self, relay_id: str, resource_id: str, timestamp: datetime
+        self,
+        relay_id: str,
+        resource_id: str,
+        timestamp: datetime,
+        subdoc_snapshot: Optional[bytes] = None,
+        baseline_only: bool = False,
     ) -> SyncResult:
         """Process a document change notification with individual UUIDs"""
         try:
@@ -100,22 +113,32 @@ class SyncEngine:
                 # Initialize git repo for this folder
                 self.persistence_manager.init_git_repo(relay_id, resource_id)
 
-                # Update our stored filemeta for this folder
                 old_filemeta = self.persistence_manager.filemeta_folders[relay_id].get(
                     resource_id, {}
                 )
-                self.persistence_manager.filemeta_folders[relay_id][resource_id] = filemeta_dict
-
-                # Rebuild resource index since filemeta changed
-                self.persistence_manager._build_resource_index(relay_id)
 
                 # Apply sync algorithm for folder changes
-                folder_operations = self.apply_remote_folder_changes(
-                    relay_id, folder_resource, old_filemeta, filemeta_dict
+                folder_operations, filemeta_accepted = self._apply_remote_folder_changes(
+                    relay_id,
+                    folder_resource,
+                    old_filemeta,
+                    filemeta_dict,
+                    incremental=True,
                 )
                 operations = folder_operations
 
-                print(f"Updated filemeta_v0 for folder {resource_id}")
+                if filemeta_accepted:
+                    self.persistence_manager.filemeta_folders[relay_id][resource_id] = filemeta_dict
+                    print(f"Updated filemeta_v0 for folder {resource_id}")
+                else:
+                    logger.warning(
+                        "Preserving prior filemeta for folder %s because the remote "
+                        "snapshot was gated",
+                        resource_id,
+                    )
+
+                # Rebuild after operations so local state and accepted filemeta agree.
+                self.persistence_manager._build_resource_index(relay_id)
 
             else:
                 # This should be a document/canvas/file - lookup type from resource index
@@ -151,6 +174,22 @@ class SyncEngine:
                         )
                         return SyncResult(resource=None, operations=[], success=True)
 
+                    subdoc_head = (
+                        hashlib.sha256(subdoc_snapshot).hexdigest()
+                        if subdoc_snapshot is not None
+                        else None
+                    )
+                    if subdoc_head is not None:
+                        old_head = self.persistence_manager.subdoc_heads[relay_id].get(resource_id)
+                        if old_head == subdoc_head:
+                            return SyncResult(resource=None, operations=[], success=True)
+                        if baseline_only:
+                            self.persistence_manager.subdoc_heads[relay_id][
+                                resource_id
+                            ] = subdoc_head
+                            self.persistence_manager.save_persistent_data(relay_id)
+                            return SyncResult(resource=None, operations=[], success=True)
+
                     # Fetch content based on resource type
                     if isinstance(document_resource, S3RemoteDocument):
                         content_str = self.relay_client.fetch_document_content(document_resource)
@@ -175,11 +214,9 @@ class SyncEngine:
                         doc_hash = hashlib.sha256(content_str.encode("utf-8")).hexdigest()
                         print(f"Resource {resource_id} hash: {doc_hash}")
 
-                        # Store hash using resource_id
                         old_hash = self.persistence_manager.document_hashes[relay_id].get(
                             resource_id
                         )
-                        self.persistence_manager.document_hashes[relay_id][resource_id] = doc_hash
 
                         # If this is a document update, trigger sync
                         if old_hash != doc_hash:
@@ -187,8 +224,20 @@ class SyncEngine:
                                 document_resource, content_str, doc_hash
                             )
                             operations = [operation] if operation else []
+                            if operation and not operation.error:
+                                self.persistence_manager.document_hashes[relay_id][
+                                    resource_id
+                                ] = doc_hash
+                                if subdoc_head is not None:
+                                    self.persistence_manager.subdoc_heads[relay_id][
+                                        resource_id
+                                    ] = subdoc_head
                         else:
                             operations = []
+                            if subdoc_head is not None:
+                                self.persistence_manager.subdoc_heads[relay_id][
+                                    resource_id
+                                ] = subdoc_head
                     else:
                         operations = []
 
@@ -219,6 +268,11 @@ class SyncEngine:
             # Ensure relay data is loaded
             self.persistence_manager.load_persistent_data(relay_id)
 
+            folder_id = getattr(resource, "folder_id", None)
+            if folder_id and not self.persistence_manager.should_sync_folder(relay_id, folder_id):
+                print(f"Skipping sync request for unconfigured folder {relay_id}/{folder_id}")
+                return SyncResult(resource=resource, operations=[], success=True)
+
             # Get document structure
             doc, parsed_content = self.relay_client.get_document_structure(resource)
             print(f"Document {resource} keys: {doc.keys()}")
@@ -231,29 +285,31 @@ class SyncEngine:
                 folder_uuid = S3RN.get_folder_id(resource)
                 print(f"Document {resource} is a folder with filemeta_v0")
 
-                if not self.persistence_manager.should_sync_folder(relay_id, folder_uuid):
-                    print(f"Skipping sync request for unconfigured folder {relay_id}/{folder_uuid}")
-                    return SyncResult(resource=resource, operations=[], success=True)
-
                 # Initialize git repo for this folder
                 self.persistence_manager.init_git_repo(relay_id, folder_uuid)
 
-                # Update our stored filemeta for this folder using folder_uuid
                 old_filemeta = self.persistence_manager.filemeta_folders[relay_id].get(
                     folder_uuid, {}
                 )
-                self.persistence_manager.filemeta_folders[relay_id][folder_uuid] = filemeta_dict
-
-                # Rebuild resource index since filemeta changed
-                self.persistence_manager._build_resource_index(relay_id)
 
                 # Apply sync algorithm for folder changes
-                folder_operations = self.apply_remote_folder_changes(
+                folder_operations, filemeta_accepted = self._apply_remote_folder_changes(
                     relay_id, resource, old_filemeta, filemeta_dict
                 )
                 operations.extend(folder_operations)
 
-                print(f"Updated filemeta_v0 for folder {resource}")
+                if filemeta_accepted:
+                    self.persistence_manager.filemeta_folders[relay_id][folder_uuid] = filemeta_dict
+                    print(f"Updated filemeta_v0 for folder {resource}")
+                else:
+                    logger.warning(
+                        "Preserving prior filemeta for folder %s because the remote "
+                        "snapshot was gated",
+                        folder_uuid,
+                    )
+
+                # Rebuild after operations so local state and accepted filemeta agree.
+                self.persistence_manager._build_resource_index(relay_id)
 
             # Handle text document
             elif parsed_content.get("type") == "document":
@@ -265,15 +321,15 @@ class SyncEngine:
                 doc_hash = hashlib.sha256(content_str.encode("utf-8")).hexdigest()
                 print(f"Document {resource} hash: {doc_hash}")
 
-                # Store hash using document UUID
                 old_hash = self.persistence_manager.document_hashes[relay_id].get(doc_uuid)
-                self.persistence_manager.document_hashes[relay_id][doc_uuid] = doc_hash
 
                 # If this is a document update, trigger sync
                 if old_hash != doc_hash:
                     operation = self.handle_document_update(resource, content_str, doc_hash)
                     if operation:
                         operations.append(operation)
+                        if not operation.error:
+                            self.persistence_manager.document_hashes[relay_id][doc_uuid] = doc_hash
 
             # Handle canvas document
             elif parsed_content.get("type") == "canvas":
@@ -285,15 +341,17 @@ class SyncEngine:
                 doc_hash = hashlib.sha256(content_str.encode("utf-8")).hexdigest()
                 print(f"Canvas {resource} hash: {doc_hash}")
 
-                # Store hash using canvas UUID
                 old_hash = self.persistence_manager.document_hashes[relay_id].get(canvas_uuid)
-                self.persistence_manager.document_hashes[relay_id][canvas_uuid] = doc_hash
 
                 # If this is a canvas update, trigger sync
                 if old_hash != doc_hash:
                     operation = self.handle_document_update(resource, content_str, doc_hash)
                     if operation:
                         operations.append(operation)
+                        if not operation.error:
+                            self.persistence_manager.document_hashes[relay_id][
+                                canvas_uuid
+                            ] = doc_hash
             else:
                 print(f"Document {resource} has no recognized content type")
 
@@ -382,11 +440,26 @@ class SyncEngine:
     def apply_remote_folder_changes(
         self, relay_id: str, folder_resource: S3RemoteFolder, old_filemeta: Dict, new_filemeta: Dict
     ) -> List[SyncOperation]:
+        operations, _filemeta_accepted = self._apply_remote_folder_changes(
+            relay_id, folder_resource, old_filemeta, new_filemeta
+        )
+        return operations
+
+    def _apply_remote_folder_changes(
+        self,
+        relay_id: str,
+        folder_resource: S3RemoteFolder,
+        old_filemeta: Dict,
+        new_filemeta: Dict,
+        *,
+        incremental: bool = False,
+    ) -> Tuple[List[SyncOperation], bool]:
         """
         Algorithm for applying remote folder changes to the local vault.
-        This is the main entry point that orchestrates the sync process.
+        Returns the operations and whether new_filemeta is safe to persist.
         """
         folder_uuid = S3RN.get_folder_id(folder_resource)
+        folder_key = (relay_id, folder_uuid)
         print(f"Applying remote folder changes for folder {folder_uuid} in relay {relay_id}")
 
         # Get or create per-folder sync lock
@@ -400,6 +473,18 @@ class SyncEngine:
             try:
                 membership_size = self._file_entry_count(new_filemeta)
                 local_file_count = self._local_file_count(relay_id, folder_uuid)
+                sync_filemeta = (
+                    self._changed_filemeta_entries(old_filemeta, new_filemeta)
+                    if incremental
+                    else new_filemeta
+                )
+                if incremental:
+                    logger.info(
+                        "Folder %s metadata changed for %d of %d entries",
+                        folder_uuid,
+                        len(sync_filemeta),
+                        len(new_filemeta),
+                    )
 
                 # Publication rule (relay/src/folder-hsm/bridge.ts): a wholly
                 # empty remote map against non-empty local membership is a
@@ -412,9 +497,9 @@ class SyncEngine:
                         f"entries while {local_file_count} local files exist. This is a "
                         f"publication/reset state, not a mass deletion."
                     )
-                    return []
+                    return [], False
 
-                self._truncation_gates[folder_uuid] = {
+                self._truncation_gates[folder_key] = {
                     "applied": 0,
                     "limit": mass_change_threshold(membership_size),
                 }
@@ -425,7 +510,12 @@ class SyncEngine:
                 # Phase 1: Process folder operations first (renames/moves affect files)
                 print(f"Phase 1: Processing folder operations for {folder_uuid}")
                 self.sync_by_type(
-                    relay_id, folder_resource, new_filemeta, diff_log, operations, [SyncType.FOLDER]
+                    relay_id,
+                    folder_resource,
+                    sync_filemeta,
+                    diff_log,
+                    operations,
+                    [SyncType.FOLDER],
                 )
 
                 # Wait for folder operations to complete
@@ -443,7 +533,7 @@ class SyncEngine:
                     SyncType.FILE,
                 ]
                 self.sync_by_type(
-                    relay_id, folder_resource, new_filemeta, diff_log, operations, file_sync_types
+                    relay_id, folder_resource, sync_filemeta, diff_log, operations, file_sync_types
                 )
 
                 # Phase 3: Handle deletions after creates/renames complete
@@ -464,6 +554,7 @@ class SyncEngine:
                 # one filemeta snapshot is weak evidence, so a burst above the
                 # threshold is held instead of applied.
                 delete_threshold = mass_change_threshold(membership_size)
+                filemeta_accepted = True
                 if len(deletes) > delete_threshold and not allow_mass_delete():
                     logger.error(
                         f"Gating deletion burst for folder {folder_uuid}: {len(deletes)} "
@@ -472,6 +563,7 @@ class SyncEngine:
                         f"RELAY_GIT_ALLOW_MASS_DELETE=1 and re-sync to apply."
                     )
                     deletes = []
+                    filemeta_accepted = False
                 operations.extend(deletes)
 
                 # Execute all operations
@@ -485,14 +577,22 @@ class SyncEngine:
                     for log_entry in diff_log:
                         print(f"  {log_entry}")
 
-                return operations
+                return operations, filemeta_accepted
 
             except Exception as e:
                 logger.error(f"Error syncing folder {folder_uuid}: {e}")
                 logger.error(f"Folder sync traceback: {traceback.format_exc()}")
-                return []
+                return [], False
             finally:
-                self._truncation_gates.pop(folder_uuid, None)
+                self._truncation_gates.pop(folder_key, None)
+
+    def _changed_filemeta_entries(self, old_filemeta: Dict, new_filemeta: Dict) -> Dict:
+        """Return new or modified entries for an event-driven folder sync."""
+        return {
+            path: metadata
+            for path, metadata in new_filemeta.items()
+            if old_filemeta.get(path) != metadata
+        }
 
     def _file_entry_count(self, filemeta: Dict) -> int:
         return sum(
@@ -521,11 +621,7 @@ class SyncEngine:
         engrave into files. Returns True when the operation must be skipped.
         """
         folder_uuid = S3RN.get_folder_id(operation.folder_resource)
-        gate = self._truncation_gates.get(folder_uuid)
-        if gate is None:
-            # Single-document event outside a folder pass: allow.
-            return False
-
+        folder_key = (relay_id, folder_uuid)
         folder_path = self.persistence_manager.get_folder_path_with_prefix(relay_id, folder_uuid)
         full_path = self.persistence_manager._sanitize_path(operation.path, folder_path)
         try:
@@ -534,17 +630,46 @@ class SyncEngine:
         except OSError:
             return False
 
-        if gate["applied"] >= gate["limit"]:
-            operation.error = "Truncation burst gated: refusing to empty another non-empty file"
-            logger.error(
-                f"Gating truncation burst for folder {folder_uuid}: more than "
-                f"{gate['limit']} non-empty files would be emptied in one sync pass. "
-                f"Skipping {operation.path}."
-            )
-            return True
+        gate = self._truncation_gates.get(folder_key)
+        if gate is not None:
+            if gate["applied"] >= gate["limit"]:
+                operation.error = "Truncation burst gated: refusing to empty another non-empty file"
+                logger.error(
+                    f"Gating truncation burst for folder {folder_uuid}: more than "
+                    f"{gate['limit']} non-empty files would be emptied in one sync pass. "
+                    f"Skipping {operation.path}."
+                )
+                return True
 
-        gate["applied"] += 1
-        return False
+            gate["applied"] += 1
+            return False
+
+        membership = self.persistence_manager.filemeta_folders.get(relay_id, {}).get(
+            folder_uuid, {}
+        )
+        limit = mass_change_threshold(self._file_entry_count(membership))
+        now = time.monotonic()
+        cutoff = now - TRUNCATION_EVENT_WINDOW_SECONDS
+
+        with self._truncation_gate_lock:
+            recent = self._recent_truncations.setdefault(folder_key, deque())
+            while recent and recent[0] < cutoff:
+                recent.popleft()
+
+            if len(recent) >= limit:
+                operation.error = "Truncation burst gated: refusing to empty another non-empty file"
+                logger.error(
+                    "Gating truncation burst for folder %s: %d non-empty files "
+                    "were already emptied in the last %.0f seconds. Skipping %s.",
+                    folder_uuid,
+                    limit,
+                    TRUNCATION_EVENT_WINDOW_SECONDS,
+                    operation.path,
+                )
+                return True
+
+            recent.append(now)
+            return False
 
     def sync_by_type(
         self,

@@ -22,10 +22,10 @@ Relay Server Git Sync monitors collaborative documents in Relay Server over webs
 ## How It Works
 
 1. Git Sync subscribes to configured Shared Folders over Relay websocket connections
-2. System analyzes changes and plans sync operations
-3. Files are updated locally with proper conflict resolution
-4. Changes are automatically committed to Git with timestamps
-5. Process repeats continuously for real-time synchronization
+2. Subdocument index heads identify which documents actually changed
+3. Folder metadata is diffed for incremental creates, renames, moves, and deletes
+4. Only changed document bodies are fetched and written locally
+5. Changes are automatically committed to Git with timestamps
 
 
 ## Setup
@@ -70,6 +70,10 @@ for local-only snapshots.
 Websocket listening is the default transport. Git Sync opens an outbound connection to
 Relay Server and receives change events there. This is the simplest deployment because
 Git Sync does not need to accept inbound connections from Relay Server.
+
+Git Sync sends websocket keepalive pings and uses Relay's subdocument index for
+reconnect catch-up. Index heads are persisted locally, so reconnecting compares the
+known documents cheaply and fetches only documents whose heads advanced.
 
 Webhook transport is available when you intentionally deploy Git Sync behind a stable URL
 that Relay Server can reach. Webhooks avoid keeping a long-lived listener connected and
@@ -248,6 +252,7 @@ data-dir/
 └── state/
     └── <relay-id>/
         ├── document_hashes.json  # Change tracking
+        ├── subdoc_heads.json     # Persisted Relay subdocument index heads
         ├── shared_folders.json   # Folder metadata
         └── local_state.json      # File state per folder
 ```

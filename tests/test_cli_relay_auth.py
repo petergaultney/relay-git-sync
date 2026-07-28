@@ -232,9 +232,7 @@ def test_cli_setup_infers_relay_id_from_config_flag(tmp_path, monkeypatch, capsy
     assert payload["data"]["webhook"] is None
 
 
-def test_cli_generate_auth_alias_infers_relay_id_from_git_config(
-    tmp_path, monkeypatch, capsys
-):
+def test_cli_generate_auth_alias_infers_relay_id_from_git_config(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("RELAY_ID", raising=False)
     monkeypatch.delenv("RELAY_SERVER_URL", raising=False)
     write_git_connectors(tmp_path)
@@ -274,9 +272,7 @@ def test_cli_setup_uses_relay_id_arg_before_git_config(tmp_path, monkeypatch, ca
     assert payload["data"]["token"]["relayId"] == RELAY_ID
 
 
-def test_cli_setup_requires_arg_when_git_config_has_multiple_relays(
-    tmp_path, monkeypatch, capsys
-):
+def test_cli_setup_requires_arg_when_git_config_has_multiple_relays(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("RELAY_ID", raising=False)
     monkeypatch.delenv("RELAY_SERVER_URL", raising=False)
     write_legacy_git_connectors(tmp_path, [RELAY_ID, OTHER_RELAY_ID])

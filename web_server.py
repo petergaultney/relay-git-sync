@@ -2,21 +2,21 @@
 
 import json
 import logging
-import traceback
 import os
+import traceback
 
+import uvicorn
+import yaml
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, HTMLResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
-import uvicorn
-import yaml
 
-from webhook_handler import WebhookProcessor
-from operations_queue import OperationsQueue
 from auth_middleware import AuthMiddleware, DefaultRejectMiddleware, noauth, webhook_auth
+from operations_queue import OperationsQueue
 from persistence import PersistenceManager, SSHKeyManager
+from webhook_handler import WebhookProcessor
 
 logger = logging.getLogger(__name__)
 

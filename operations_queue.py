@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 
+import logging
 import queue
 import threading
 import time
-import logging
-from typing import Optional
+from typing import Dict, Optional, Tuple
+
 from models import SyncRequest, SyncResult, SyncState
 from sync_engine import SyncEngine
 
 logger = logging.getLogger(__name__)
+
+DOCUMENT_CHANGE = "document_change"
 
 
 class OperationsQueue:
@@ -19,6 +22,8 @@ class OperationsQueue:
         self.commit_interval = commit_interval
         self.request_queue = queue.Queue()
         self.sync_state = SyncState()
+        self._document_changes: Dict[Tuple[str, str], dict] = {}
+        self._document_changes_lock = threading.Lock()
 
         # Start worker thread and git commit timer
         self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
@@ -33,11 +38,33 @@ class OperationsQueue:
         self.request_queue.put(request)
 
     def enqueue_document_change(self, change_data: dict):
-        """Add a document change notification to the processing queue"""
+        """Coalesce queued notifications for the same Relay resource."""
+        key = (change_data["relay_id"], change_data["resource_id"])
+        with self._document_changes_lock:
+            already_queued = key in self._document_changes
+            existing = self._document_changes.get(key, {})
+            merged = {**existing, **change_data}
+            if "subdoc_snapshot" in existing and "subdoc_snapshot" not in change_data:
+                merged["subdoc_snapshot"] = existing["subdoc_snapshot"]
+                merged["baseline_only"] = existing.get("baseline_only", False)
+            self._document_changes[key] = merged
+
+        if already_queued:
+            logger.debug(
+                "Coalesced document change for relay=%s resource=%s",
+                key[0],
+                key[1],
+            )
+            return
+
         print(
             f"Enqueuing document change for relay: {change_data['relay_id']}, resource: {change_data['resource_id']} at {change_data['timestamp']}"
         )
-        self.request_queue.put(change_data)
+        self.request_queue.put((DOCUMENT_CHANGE, key))
+
+    def _take_document_change(self, key: Tuple[str, str]) -> Optional[dict]:
+        with self._document_changes_lock:
+            return self._document_changes.pop(key, None)
 
     def _worker_loop(self):
         """Main worker loop that processes sync requests"""
@@ -45,27 +72,32 @@ class OperationsQueue:
             try:
                 # Get next request from queue (blocks until available)
                 request = self.request_queue.get(timeout=1.0)
+                result = None
 
-                # Process the request (could be SyncRequest or document change data)
-                if isinstance(request, SyncRequest):
-                    result = self._process_with_state_management(request)
-                elif isinstance(request, dict) and "relay_id" in request:
-                    # Handle document change data with individual UUIDs
-                    result = self.sync_engine.process_document_change(
-                        request["relay_id"],
-                        request["resource_id"],  # Individual UUID, not compound ID
-                        request["timestamp"],
-                    )
-                else:
-                    logger.warning(f"Unknown request type: {type(request)}")
-                    continue
+                try:
+                    if isinstance(request, SyncRequest):
+                        result = self._process_with_state_management(request)
+                    elif (
+                        isinstance(request, tuple)
+                        and len(request) == 2
+                        and request[0] == DOCUMENT_CHANGE
+                    ):
+                        change_data = self._take_document_change(request[1])
+                        if change_data is not None:
+                            result = self.sync_engine.process_document_change(
+                                change_data["relay_id"],
+                                change_data["resource_id"],
+                                change_data["timestamp"],
+                                subdoc_snapshot=change_data.get("subdoc_snapshot"),
+                                baseline_only=change_data.get("baseline_only", False),
+                            )
+                    else:
+                        logger.warning(f"Unknown request type: {type(request)}")
 
-                # Mark queue task as done
-                self.request_queue.task_done()
-
-                # If operations were performed, mark that we have changes
-                if result.success and result.operations:
-                    self.sync_state.has_changes = True
+                    if result and result.success and result.operations:
+                        self.sync_state.has_changes = True
+                finally:
+                    self.request_queue.task_done()
 
             except queue.Empty:
                 # Timeout - continue loop

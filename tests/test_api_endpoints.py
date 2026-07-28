@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 
 import os
-import pytest
 import tempfile
 from unittest.mock import Mock, patch
+
+import pytest
 from starlette.testclient import TestClient
 
-from web_server import StarletteWebServer
-from webhook_handler import WebhookProcessor
 from operations_queue import OperationsQueue
 from persistence import PersistenceManager, SSHKeyManager
+from web_server import StarletteWebServer
+from webhook_handler import WebhookProcessor
 
 
 class TestPubkeyEndpoint:

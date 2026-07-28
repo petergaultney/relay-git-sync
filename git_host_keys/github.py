@@ -2,7 +2,6 @@ from typing import List
 
 from .provider import KnownHostKeyFetchError, get_json
 
-
 HOST = "github.com"
 SOURCE_URL = "https://api.github.com/meta"
 

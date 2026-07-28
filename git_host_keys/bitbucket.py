@@ -2,7 +2,6 @@ from typing import List
 
 from .provider import get_text, parse_known_hosts_entries
 
-
 HOST = "bitbucket.org"
 SOURCE_URL = "https://bitbucket.org/site/ssh"
 

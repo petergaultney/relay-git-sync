@@ -2,7 +2,6 @@ from typing import List
 
 from .provider import get_text, parse_known_hosts_entries
 
-
 HOST = "gitlab.com"
 SOURCE_URL = "https://docs.gitlab.com/user/gitlab_com/"
 

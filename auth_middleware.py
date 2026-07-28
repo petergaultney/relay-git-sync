@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
 import logging
-from typing import List, Optional, Callable
 from functools import wraps
+from typing import Callable, List, Optional
+
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 from starlette.routing import Match
+
 from jwt_auth import JWTValidator
 
 try:

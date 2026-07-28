@@ -76,7 +76,9 @@ class RelayFile:
     def download_url(self, file_hash: Optional[str] = None) -> str:
         return self.client.get_file_download_url(self.doc_id, file_hash or self._required_hash())
 
-    def download(self, file_hash: Optional[str] = None, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> bytes:
+    def download(
+        self, file_hash: Optional[str] = None, timeout: int = DEFAULT_TIMEOUT_SECONDS
+    ) -> bytes:
         return self.client.download_file(
             self.doc_id,
             file_hash or self._required_hash(),
@@ -249,6 +251,11 @@ class SubdocSubscription:
             frame = frame.encode("utf-8")
         return decode_message(frame)
 
+    def ping(self) -> None:
+        if self.ws is None:
+            raise RuntimeError("subscription is not connected")
+        self.ws.ping()
+
     def close(self) -> None:
         if self.ws is not None:
             self.ws.close()
@@ -266,9 +273,7 @@ class SubdocSubscription:
 class RelayClient:
     def __init__(self, connection_string: str, token: Optional[str] = None):
         parsed_url = urlparse(connection_string)
-        self.token = token or (
-            parsed_url.username and requests.utils.unquote(parsed_url.username)
-        )
+        self.token = token or (parsed_url.username and requests.utils.unquote(parsed_url.username))
 
         scheme = parsed_url.scheme
         if scheme == "ys":
@@ -384,11 +389,11 @@ class RelayClient:
     def get_client_token(self, doc_id: Union[str, Dict[str, str]]) -> Dict[str, str]:
         if isinstance(doc_id, dict):
             doc_id = doc_id["docId"]
-        return self._request(f"doc/{_quote_path_part(doc_id)}/auth", method="POST", json_data={}).json()
+        return self._request(
+            f"doc/{_quote_path_part(doc_id)}/auth", method="POST", json_data={}
+        ).json()
 
-    def get_or_create_doc_and_token(
-        self, doc_id: Optional[str] = None
-    ) -> Dict[str, str]:
+    def get_or_create_doc_and_token(self, doc_id: Optional[str] = None) -> Dict[str, str]:
         result = self.create_doc(doc_id)
         return self.get_client_token(result)
 
@@ -536,9 +541,7 @@ def get_or_create_doc_and_token(
     return manager.get_or_create_doc_and_token(doc_id)
 
 
-def get_client_token(
-    connection_string: str, doc_id: Union[str, Dict[str, str]]
-) -> Dict[str, str]:
+def get_client_token(connection_string: str, doc_id: Union[str, Dict[str, str]]) -> Dict[str, str]:
     manager = RelayClient(connection_string)
     return manager.get_client_token(doc_id)
 

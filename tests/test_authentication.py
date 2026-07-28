@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 
 import json
-from starlette.testclient import TestClient
+
 from starlette.applications import Starlette
-from starlette.routing import Route
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
+import auth_middleware
 from auth_middleware import (
     AuthMiddleware,
     DefaultRejectMiddleware,
-    noauth,
-    webhook_auth,
     api_auth,
+    noauth,
     require_auth,
+    webhook_auth,
 )
-import auth_middleware
-from cli import generate_webhook_secret, create_jwt_token
-from web_server import StarletteWebServer
-from webhook_handler import WebhookProcessor
+from cli import create_jwt_token, generate_webhook_secret
 from operations_queue import OperationsQueue
+from persistence import PersistenceManager
 from relay_client import RelayClient
 from sync_engine import SyncEngine
-from persistence import PersistenceManager
+from web_server import StarletteWebServer
+from webhook_handler import WebhookProcessor
 
 
 def test_basic_middleware_functionality():

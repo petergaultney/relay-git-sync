@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 
+import json
 import logging
 import traceback
-import json
-from typing import Optional, Dict, Any
-from relay_sdk import RelayClient as RelaySDKClient
-from pycrdt import Doc, Text, Map
-from s3rn import S3RNType, S3RN, S3RemoteFolder, S3RemoteDocument, S3RemoteFile, S3RemoteCanvas
+from typing import Any, Dict, Optional
+
+from pycrdt import Doc, Map, Text
+
 from models import ResourceType, get_s3rn_resource_category
+from relay_sdk import RelayClient as RelaySDKClient
+from s3rn import S3RN, S3RemoteCanvas, S3RemoteDocument, S3RemoteFile, S3RemoteFolder, S3RNType
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +17,7 @@ logger = logging.getLogger(__name__)
 # plugin (src/merge-hsm/state-vectors.ts isEmptyDoc, BackgroundSync.ts
 # downloadByGuid) treats this as "server has the guid registered but no peer
 # has uploaded content yet" and defers — it is never authoritative-empty.
-# Cross-relay re-shares legitimately leave docs in this state (BUG-229).
+# Cross-relay re-shares can legitimately leave docs in this state.
 EMPTY_STATE_VECTOR = b"\x00"
 
 

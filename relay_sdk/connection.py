@@ -1,7 +1,8 @@
-import requests
-import logging
 import json
+import logging
 from typing import Dict, Optional
+
+import requests
 
 from .update import UpdateContext
 
@@ -19,19 +20,19 @@ class DocConnection:
         self, path: str, method: str = "GET", data: Optional[bytes] = None
     ) -> requests.Response:
         url = f"{self.base_url}/{path}"
-        
+
         # Log request without sensitive info
         logger.debug(f"🌐 RELAY REQUEST: {method} {url}")
         if data:
             logger.debug(f"📦 REQUEST BODY: {len(data)} bytes")
-        
+
         response = requests.request(method, url, headers=self.headers, data=data)
-        
+
         logger.debug(f"✅ RELAY RESPONSE: {response.status_code} ({len(response.content)} bytes)")
-        
+
         if response.status_code != 200:
             logger.error(f"❌ RELAY REQUEST FAILED: {response.status_code}")
-        
+
         response.raise_for_status()
         return response
 

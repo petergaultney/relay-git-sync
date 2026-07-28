@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 
 import argparse
-import os
 import logging
-from relay_client import RelayClient
-from persistence import PersistenceManager
-from sync_engine import SyncEngine
-from webhook_handler import WebhookProcessor
-from operations_queue import OperationsQueue
-from web_server import create_server
-from websocket_listener import WebsocketChangeListener
-from relay_auth import generate_setup, print_setup
+import os
+
 from git_config import resolve_relay_id, resolve_relay_url, resolve_webhook_url
+from operations_queue import OperationsQueue
+from persistence import PersistenceManager
+from relay_auth import generate_setup, print_setup
+from relay_client import RelayClient
+from sync_engine import SyncEngine
+from web_server import create_server
+from webhook_handler import WebhookProcessor
+from websocket_listener import WebsocketChangeListener
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -122,16 +123,16 @@ def run_server(
         web_server = create_server(
             webhook_processor, operations_queue, webhook_secret, persistence_manager
         )
-
-        # Run startup sync for all configured git connectors
-        startup_sync_all_folders(sync_engine, persistence_manager)
-
         websocket_listener = WebsocketChangeListener(
             relay_client,
             operations_queue,
             persistence_manager,
             reconnect_delay=websocket_reconnect_delay,
         )
+
+        # Run startup sync for all configured git connectors
+        startup_sync_all_folders(sync_engine, persistence_manager)
+
         websocket_listener.start()
 
         # Start the server
@@ -219,7 +220,9 @@ if __name__ == "__main__":
         exit(1)
 
     if not args.relay_id:
-        print("Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id.")
+        print(
+            "Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id."
+        )
         exit(1)
 
     relay_server_api_key = os.getenv("RELAY_SERVER_API_KEY")

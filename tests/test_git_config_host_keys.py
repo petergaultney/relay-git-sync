@@ -4,8 +4,8 @@ import tempfile
 
 import pytest
 
-from git_host_keys import KnownHostKeyFetchError
 from git_config import GitConnectorConfig
+from git_host_keys import KnownHostKeyFetchError
 
 
 class TestGitConfigHostKeys:

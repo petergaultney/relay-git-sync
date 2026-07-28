@@ -1,10 +1,10 @@
+import hashlib
 from datetime import timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from relay_client import RelayClient
 from websocket_listener import WebsocketChangeListener
-
 
 RELAY_ID = "85a06712-af14-47bc-a859-e8106cc786e8"
 FOLDER_ID = "3667fcda-755e-472b-abea-4b4fc96873a9"
@@ -24,6 +24,7 @@ def make_listener():
                 }
             }
         },
+        subdoc_heads={RELAY_ID: {}},
         load_persistent_data=Mock(),
     )
     queue = SimpleNamespace(enqueue_document_change=Mock())
@@ -45,8 +46,9 @@ def test_known_subdoc_guids_match_relay_provider_shape():
     ]
 
 
-def test_event_message_enqueues_changed_resource_id():
+def test_event_message_enqueues_only_changed_subdoc():
     listener, queue, _persistence = make_listener()
+    subscription = SimpleNamespace(query=Mock())
 
     listener._handle_message(
         RELAY_ID,
@@ -59,17 +61,43 @@ def test_event_message_enqueues_changed_resource_id():
                 "timestamp": 1_719_000_000_123,
             },
         },
-        subscription=SimpleNamespace(query=Mock()),
+        subscription=subscription,
     )
 
+    subscription.query.assert_not_called()
     change = queue.enqueue_document_change.call_args.args[0]
     assert change["relay_id"] == RELAY_ID
     assert change["resource_id"] == DOC_ID
     assert change["timestamp"].tzinfo == timezone.utc
 
 
-def test_subdoc_index_message_enqueues_advertised_heads():
+def test_folder_event_enqueues_incremental_filemeta_sync_without_querying_all_subdocs():
     listener, queue, _persistence = make_listener()
+    subscription = SimpleNamespace(query=Mock())
+
+    listener._handle_message(
+        RELAY_ID,
+        FOLDER_ID,
+        {
+            "type": "event",
+            "data": {
+                "event_type": "document.updated",
+                "doc_id": f"{RELAY_ID}-{FOLDER_ID}",
+                "timestamp": 1_719_000_000_123,
+            },
+        },
+        subscription=subscription,
+    )
+
+    subscription.query.assert_not_called()
+    change = queue.enqueue_document_change.call_args.args[0]
+    assert change["relay_id"] == RELAY_ID
+    assert change["resource_id"] == FOLDER_ID
+
+
+def test_initial_subdoc_index_baselines_heads_covered_by_startup_sync():
+    listener, queue, _persistence = make_listener()
+    listener._catchup_since_millis = 1_800_000_000_000
 
     listener._handle_message(
         RELAY_ID,
@@ -79,6 +107,7 @@ def test_subdoc_index_message_enqueues_advertised_heads():
             "snapshots": {
                 f"{RELAY_ID}-{DOC_ID}": SimpleNamespace(
                     guid=f"{RELAY_ID}-{DOC_ID}",
+                    snapshot=b"initial-head",
                     last_seen=1_719_000_000_123,
                 )
             },
@@ -87,5 +116,71 @@ def test_subdoc_index_message_enqueues_advertised_heads():
     )
 
     change = queue.enqueue_document_change.call_args.args[0]
+    assert change["resource_id"] == DOC_ID
+    assert change["subdoc_snapshot"] == b"initial-head"
+    assert change["baseline_only"] is True
+
+
+def test_reconnect_subdoc_index_enqueues_only_advanced_heads():
+    listener, queue, _persistence = make_listener()
+    guid = f"{RELAY_ID}-{DOC_ID}"
+    subscription = SimpleNamespace(query=Mock())
+
+    listener._handle_message(
+        RELAY_ID,
+        FOLDER_ID,
+        {
+            "type": "subdocs",
+            "snapshots": {
+                guid: SimpleNamespace(
+                    guid=guid,
+                    snapshot=b"initial-head",
+                    last_seen=1_719_000_000_123,
+                )
+            },
+        },
+        subscription=subscription,
+    )
+    listener._handle_message(
+        RELAY_ID,
+        FOLDER_ID,
+        {
+            "type": "subdocs",
+            "snapshots": {
+                guid: SimpleNamespace(
+                    guid=guid,
+                    snapshot=b"advanced-head",
+                    last_seen=1_719_000_000_124,
+                )
+            },
+        },
+        subscription=subscription,
+    )
+
+    change = queue.enqueue_document_change.call_args.args[0]
     assert change["relay_id"] == RELAY_ID
     assert change["resource_id"] == DOC_ID
+
+
+def test_persisted_subdoc_head_skips_unchanged_reconnect_snapshot():
+    listener, queue, persistence = make_listener()
+    snapshot = b"persisted-head"
+    persistence.subdoc_heads[RELAY_ID][DOC_ID] = hashlib.sha256(snapshot).hexdigest()
+
+    listener._handle_message(
+        RELAY_ID,
+        FOLDER_ID,
+        {
+            "type": "subdocs",
+            "snapshots": {
+                f"{RELAY_ID}-{DOC_ID}": SimpleNamespace(
+                    guid=f"{RELAY_ID}-{DOC_ID}",
+                    snapshot=snapshot,
+                    last_seen=1_719_000_000_123,
+                )
+            },
+        },
+        subscription=SimpleNamespace(query=Mock()),
+    )
+
+    queue.enqueue_document_change.assert_not_called()

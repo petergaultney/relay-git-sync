@@ -160,7 +160,7 @@ def test_setup_markdown_template_hides_private_key_and_includes_commands():
     assert "WEBHOOK_SECRET=webhook-secret" in output
     assert 'public_key = "' in output
     assert f'key_id = "{setup.keypair.key_id}"' in output
-    assert '[[webhooks]]' in output
+    assert "[[webhooks]]" in output
     assert 'prefix = "relay-id-"' in output
     assert 'url = "https://git-sync.example.com/webhooks"' in output
     assert 'auth_token = "webhook-secret"' in output

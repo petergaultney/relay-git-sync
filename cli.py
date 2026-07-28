@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 
 import argparse
-import os
-import sys
-import logging
-import secrets
 import base64
-import jwt
 import datetime
+import logging
+import os
+import secrets
+import sys
 from typing import Optional
+
 import cbor2
-from relay_client import RelayClient
-from persistence import PersistenceManager, SSHKeyManager
-from sync_engine import SyncEngine
-from s3rn import S3RemoteFolder
+import jwt
+
 from git_config import (
-    GitConnectorConfig,
     GitConnector,
+    GitConnectorConfig,
     resolve_relay_id,
     resolve_relay_url,
     resolve_webhook_url,
 )
+from persistence import PersistenceManager, SSHKeyManager
 from relay_auth import (
     generate_setup,
     generate_webhook_secret,
@@ -30,6 +29,9 @@ from relay_auth import (
     setup_as_json,
     token_info_as_json,
 )
+from relay_client import RelayClient
+from s3rn import S3RemoteFolder
+from sync_engine import SyncEngine
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -137,8 +139,8 @@ def show_pubkey_command(args):
     """Handle show-pubkey command"""
     try:
         # Create a temporary SSH key manager to extract the public key
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as temp_dir:
             ssh_key_manager = SSHKeyManager(temp_dir)
@@ -238,7 +240,9 @@ def setup_command(args):
             git_config_file=args.config,
         )
         if not relay_id:
-            print("Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id.")
+            print(
+                "Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id."
+            )
             return 1
 
         setup = generate_setup(
@@ -323,7 +327,9 @@ def git_connector_add_command(args):
             git_config_file=args.config,
         )
         if not relay_id:
-            print("Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id.")
+            print(
+                "Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id."
+            )
             return 1
 
         # Create new connector
@@ -370,7 +376,9 @@ def git_connector_remove_command(args):
             git_config_file=args.config,
         )
         if not relay_id:
-            print("Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id.")
+            print(
+                "Error: Relay ID is required. Set [relay].id in git_connectors.toml or pass --relay-id."
+            )
             return 1
 
         removed = git_config.remove_connector(relay_id, args.folder_id)

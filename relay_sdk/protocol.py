@@ -86,9 +86,7 @@ def encode_query_subdocs(guids: Sequence[str]) -> bytes:
     if not guids:
         raise ValueError("MSG_QUERY_SUBDOCS requires at least one GUID")
     if len(guids) > MAX_QUERY_SUBDOCS_PER_REQUEST:
-        raise ValueError(
-            f"MSG_QUERY_SUBDOCS accepts at most {MAX_QUERY_SUBDOCS_PER_REQUEST} GUIDs"
-        )
+        raise ValueError(f"MSG_QUERY_SUBDOCS accepts at most {MAX_QUERY_SUBDOCS_PER_REQUEST} GUIDs")
     return _encode_string_list_message(MSG_QUERY_SUBDOCS, guids)
 
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
 import json
-import os
 import logging
+import os
 import re
-from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from git_host_keys import (

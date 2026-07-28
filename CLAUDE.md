@@ -4,34 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a real-time synchronization bridge between Relay Server collaborative documents and Git repositories. The system monitors collaborative documents via webhooks and maintains synchronized copies in local Git repositories with automatic version control.
+This is a real-time synchronization bridge between Relay Server collaborative documents and Git repositories. The system monitors collaborative documents over websocket subscriptions, with optional webhook ingestion, and maintains synchronized copies in local Git repositories with automatic version control.
 
 ## Data-Safety Invariants
 
-This mirror follows the sync-safety principles of the Relay plugin
-(`~/stash/relay/specs/folder-hsm.md`) and relay-cli
-(`~/stash/relay-cli/specs/folder-sync.md`). Any change to sync behavior must
-preserve them:
+Any change to sync behavior must preserve these repository-level invariants:
 
 1. **Absent evidence means preserve, never trash.** The absence of a filemeta
-   entry in one snapshot is not proof of deletion (spec P2/P4). Deletion
-   bursts above `max(10% of membership, 25)` are gated, not applied
+   entry in one snapshot is not proof of deletion. Deletion bursts above
+   `max(10% of membership, 25)` are gated, not applied
    (`RELAY_GIT_ALLOW_MASS_DELETE=1` releases a gate after review).
 2. **An empty state vector means unsynced, not empty.** A Y-Doc that decodes
    to zero clients was never written: the server has the guid registered but
-   no content was uploaded yet (plugin `isEmptyDoc`/`downloadByGuid`;
-   BUG-229 cross-relay re-shares). Fetches defer; they never wipe files.
+   no content was uploaded yet. Fetches defer; they never wipe files.
 3. **A genuinely emptied doc (history present, empty text) is authoritative
    for one file, suspicious in bulk.** Truncation bursts above the same
    threshold are gated per sync pass.
 4. **A wholly-empty remote map against non-empty local files is a
-   publication/reset, never a mass deletion** (plugin `folder-hsm/bridge.ts`
-   publication rule). The mirror refuses to act on it.
+   publication/reset, never a mass deletion.** The mirror refuses to act on it.
 5. **Deletes must stay recoverable.** Deletions are regular commits — never
-   force-push, so git history is the trash (spec P5 analog).
+   force-push, so git history remains the recovery mechanism.
 6. **Filemeta carries no content hash for markdown/canvas** — content and
    emptiness live only in the per-document Y-Doc. Never infer document
    content state from filemeta.
+7. **Subdocument index heads are change signals, not content.** Persist their
+   digests for reconnect catch-up, then fetch only documents whose heads
+   changed. A folder event must diff old and new filemeta rather than sweep
+   every document.
 
 ## Key Architecture
 
@@ -39,9 +38,10 @@ The codebase follows a modular architecture with clear separation of concerns:
 
 ### Core Components
 
-- **RelayClient** (`relay_client.py`): Wrapper around Y-Sweet DocumentManager with authentication handling
+- **RelayClient** (`relay_client.py`): Wrapper around the bundled Relay SDK
 - **SyncEngine** (`sync_engine.py`): Core synchronization logic for converting Y-Sweet documents to Git repositories
 - **OperationsQueue** (`operations_queue.py`): Thread-safe queue for processing sync requests with git commit coordination
+- **WebsocketChangeListener** (`websocket_listener.py`): Live events, keepalive, and subdocument-index catch-up
 - **WebhookProcessor** (`webhook_handler.py`): Processes incoming webhook notifications from Relay Server
 - **WebServer** (`web_server.py`): HTTP server that handles webhook endpoints
 - **PersistenceManager** (`persistence.py`): Manages persistent state files and Git repository operations
@@ -54,16 +54,18 @@ The codebase follows a modular architecture with clear separation of concerns:
 
 ### Synchronization Flow
 
-1. **Webhook Reception** (`web_server.py`): HTTP endpoint receives document change notifications
-2. **Queue Management** (`operations_queue.py`): Requests are queued and processed by worker threads
-3. **Document Analysis** (`sync_engine.py`): Determines resource type (folder vs document vs file vs canvas)
-4. **Sync Operations** (`sync_engine.py`): Three-phase sync process with conflict resolution
-5. **Git Commits** (`persistence.py`): Automatic commits every 10 seconds when changes detected
+1. **Event Reception** (`websocket_listener.py`, `web_server.py`): Websocket events by default, optional webhooks
+2. **Index Catch-up** (`websocket_listener.py`): Persisted subdocument heads select changed documents
+3. **Queue Management** (`operations_queue.py`): Duplicate notifications are coalesced and processed by a worker
+4. **Document Analysis** (`sync_engine.py`): Folder metadata is diffed; changed documents are fetched
+5. **Sync Operations** (`sync_engine.py`): Three-phase sync process with conflict resolution
+6. **Git Commits** (`persistence.py`): Automatic commits every 10 seconds when changes are detected
 
 ### Data Storage
 
 - **State Directory**: `state/<relay_id>/` contains persistent state per relay:
   - `document_hashes.json`: Hash tracking for change detection
+  - `subdoc_heads.json`: Persisted Relay subdocument index head digests
   - `shared_folders.json`: Folder metadata from Relay Server
   - `local_state.json`: Local file tracking per folder
 - **Repository Directory**: `repos/<relay_id>/<folder_id>/` contains synchronized content organized by relay and folder

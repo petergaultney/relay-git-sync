@@ -83,6 +83,7 @@ def test_open_subdoc_subscription_connects_and_sends_initial_frames(monkeypatch)
     sent_frames = []
     fake_ws = SimpleNamespace(
         send_binary=sent_frames.append,
+        ping=Mock(),
         close=Mock(),
     )
     fake_websocket = SimpleNamespace(create_connection=Mock(return_value=fake_ws))
@@ -102,6 +103,9 @@ def test_open_subdoc_subscription_connects_and_sends_initial_frames(monkeypatch)
         encode_event_subscription(["document.updated"]),
         encode_query_subdocs(["relay-id-child-id"]),
     ]
+
+    subscription.ping()
+    fake_ws.ping.assert_called_once_with()
 
 
 def test_subdoc_subscription_query_pages_large_batches():

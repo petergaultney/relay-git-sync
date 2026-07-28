@@ -1,4 +1,4 @@
-"""Data-safety invariants, modeled on the Relay plugin/relay-cli sync specs.
+"""Regression tests for the repository's data-safety invariants.
 
 See CLAUDE.md "Data-Safety Invariants". The scenarios here reproduce the
 mass-wipe incident class: unsynced docs served as empty, publication/reset
@@ -230,6 +230,21 @@ class TestTruncationBurstGate:
 
         with open(os.path.join(base, "note.md")) as f:
             assert f.read() == ""
+
+    def test_document_event_burst_is_capped_across_individual_updates(self, engine):
+        paths = seed_files(engine, 40)
+        engine.persistence_manager.filemeta_folders = {RELAY_ID: {FOLDER_ID: doc_filemeta(paths)}}
+        engine.relay_client = make_relay_client(emptied_doc_update())
+
+        for path in paths:
+            engine.handle_server_update(RELAY_ID, update_operation(path))
+
+        base = folder_dir(engine)
+        emptied = sum(
+            1 for name in os.listdir(base) if os.path.getsize(os.path.join(base, name)) == 0
+        )
+        assert emptied == mass_change_threshold(40) == 25
+        assert 40 - emptied == 15
 
     def test_empty_canvas_constant_matches_fetch_output(self):
         doc = Doc()

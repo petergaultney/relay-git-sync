@@ -367,9 +367,7 @@ def webhook_note(webhook: RelayWebhook | None) -> str:
             "This setup uses the outbound Relay listener only. Add `[webhook].url` to "
             "`git_connectors.toml` if this Git Sync deployment has a public webhook URL."
         )
-    return (
-        "Git Sync will also accept Relay webhook delivery at the configured webhook URL."
-    )
+    return "Git Sync will also accept Relay webhook delivery at the configured webhook URL."
 
 
 def decoded_expires_at(expires_at: int | None) -> str:
@@ -397,6 +395,7 @@ def print_setup(setup: RelayAuthSetup) -> None:
         except ImportError:
             pass
         else:
+
             class SetupCodeBlock(CodeBlock):
                 def __rich_console__(self, console, options):
                     code = str(self.text).rstrip()

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
+import hashlib
 import logging
 import threading
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from git_config import GitConnector
 from operations_queue import OperationsQueue
@@ -11,6 +13,8 @@ from persistence import PersistenceManager
 from relay_client import RelayClient
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_KEEPALIVE_INTERVAL_SECONDS = 20.0
 
 
 class WebsocketChangeListener:
@@ -22,11 +26,14 @@ class WebsocketChangeListener:
         operations_queue: OperationsQueue,
         persistence_manager: PersistenceManager,
         reconnect_delay: float = 5.0,
+        keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL_SECONDS,
     ):
         self.relay_client = relay_client
         self.operations_queue = operations_queue
         self.persistence_manager = persistence_manager
         self.reconnect_delay = reconnect_delay
+        self.keepalive_interval = keepalive_interval
+        self._catchup_since_millis = int(time.time() * 1000)
         self._stop_event = threading.Event()
         self._threads: List[threading.Thread] = []
         self._subscriptions = []
@@ -72,7 +79,10 @@ class WebsocketChangeListener:
             try:
                 folder = self.relay_client.dm.shared_folder(relay_id, folder_id)
                 guids = self._known_subdoc_guids(relay_id, folder_id)
-                subscription = folder.open_subdoc_subscription(guids, timeout=30)
+                subscription = folder.open_subdoc_subscription(
+                    guids,
+                    timeout=self.keepalive_interval,
+                )
                 self._register_subscription(subscription)
 
                 logger.info(
@@ -82,13 +92,12 @@ class WebsocketChangeListener:
                     len(guids),
                 )
 
-                self._enqueue_change(relay_id, folder_id, datetime.now(timezone.utc))
-
                 while not self._stop_event.is_set():
                     try:
                         message = subscription.recv()
                     except Exception as exc:
                         if self._is_timeout(exc):
+                            subscription.ping()
                             continue
                         raise
 
@@ -128,24 +137,28 @@ class WebsocketChangeListener:
 
             if doc_id:
                 self._enqueue_doc_id(relay_id, folder_id, doc_id, timestamp)
-                if doc_id == f"{relay_id}-{folder_id}":
-                    self._refresh_subdoc_query(relay_id, folder_id, subscription)
             else:
                 self._enqueue_change(relay_id, folder_id, timestamp)
 
         elif message_type == "subdocs":
             for snapshot in message.get("snapshots", {}).values():
-                timestamp = self._millis_to_datetime(snapshot.last_seen)
-                self._enqueue_doc_id(relay_id, folder_id, snapshot.guid, timestamp)
-
-    def _refresh_subdoc_query(self, relay_id: str, folder_id: str, subscription) -> None:
-        guids = self._known_subdoc_guids(relay_id, folder_id)
-        if not guids:
-            return
-        try:
-            subscription.query(guids)
-        except Exception:
-            logger.debug("Failed to refresh subdoc query for folder=%s", folder_id, exc_info=True)
+                baseline_only = self._snapshot_needs_processing(
+                    relay_id,
+                    folder_id,
+                    snapshot.guid,
+                    snapshot.snapshot,
+                    snapshot.last_seen,
+                )
+                if baseline_only is not None:
+                    timestamp = self._millis_to_datetime(snapshot.last_seen)
+                    self._enqueue_doc_id(
+                        relay_id,
+                        folder_id,
+                        snapshot.guid,
+                        timestamp,
+                        subdoc_snapshot=snapshot.snapshot,
+                        baseline_only=baseline_only,
+                    )
 
     def _known_subdoc_guids(self, relay_id: str, folder_id: str) -> List[str]:
         # Read in-memory state only: reloading from disk here would race with the
@@ -168,12 +181,36 @@ class WebsocketChangeListener:
 
         return sorted(set(guids))
 
+    def _snapshot_needs_processing(
+        self,
+        relay_id: str,
+        folder_id: str,
+        guid: str,
+        snapshot: bytes,
+        last_seen: int,
+    ) -> Optional[bool]:
+        digest = hashlib.sha256(snapshot).hexdigest()
+        try:
+            resource_id = self.relay_client.extract_document_id(guid)
+        except Exception:
+            resource_id = guid
+        persisted_digest = self.persistence_manager.subdoc_heads.get(relay_id, {}).get(resource_id)
+
+        if digest == persisted_digest:
+            return None
+
+        # startup_sync_all_folders() hydrates the current documents before
+        # the listener consumes its first index response. Older first-seen
+        # heads can therefore be adopted without fetching every child again.
+        return persisted_digest is None and int(last_seen) <= self._catchup_since_millis
+
     def _enqueue_doc_id(
         self,
         expected_relay_id: str,
         fallback_folder_id: str,
         doc_id: str,
         timestamp: datetime,
+        **change_data: Any,
     ) -> None:
         try:
             relay_id = self.relay_client.extract_relay_id(doc_id)
@@ -182,14 +219,21 @@ class WebsocketChangeListener:
             relay_id = expected_relay_id
             resource_id = fallback_folder_id
 
-        self._enqueue_change(relay_id, resource_id, timestamp)
+        self._enqueue_change(relay_id, resource_id, timestamp, **change_data)
 
-    def _enqueue_change(self, relay_id: str, resource_id: str, timestamp: datetime) -> None:
+    def _enqueue_change(
+        self,
+        relay_id: str,
+        resource_id: str,
+        timestamp: datetime,
+        **change_data: Any,
+    ) -> None:
         self.operations_queue.enqueue_document_change(
             {
                 "relay_id": relay_id,
                 "resource_id": resource_id,
                 "timestamp": timestamp,
+                **change_data,
             }
         )
 

@@ -5,7 +5,6 @@ from typing import Dict, List
 from . import bitbucket, github, gitlab
 from .provider import KnownHostKeyFetchError, validate_provider_entries
 
-
 PROVIDERS: Dict[str, ModuleType] = {
     provider.HOST: provider
     for provider in (

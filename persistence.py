@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 
-import json
-import os
-import time
-import shutil
-import logging
-import traceback
-import signal
 import atexit
-import threading
 import glob
+import json
+import logging
+import os
+import shutil
+import signal
 import subprocess
-from typing import Dict, Any, Optional, List
+import threading
+import time
+import traceback
+from typing import Any, Dict, List, Optional
+
 import git
-from s3rn import (
-    S3RNType,
-    S3RN,
-    S3RemoteFolder,
-    S3RemoteDocument,
-    S3RemoteCanvas,
-    S3RemoteFile,
-    ResourceInterface,
-)
-from models import get_s3rn_resource_category
+
 from git_config import GitConnectorConfig, default_git_config_file
+from models import get_s3rn_resource_category
+from s3rn import (
+    S3RN,
+    ResourceInterface,
+    S3RemoteCanvas,
+    S3RemoteDocument,
+    S3RemoteFile,
+    S3RemoteFolder,
+    S3RNType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +86,8 @@ class SSHKeyManager:
 
     def _extract_public_key(self, private_key_pem: str) -> str:
         """Extract public key from private key"""
-        from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.backends import default_backend
+        from cryptography.hazmat.primitives import serialization
 
         try:
             # Load private key
@@ -134,6 +136,7 @@ class PersistenceManager:
     """Manage file-based state and git repository operations"""
 
     HASHES_FILE = "document_hashes.json"
+    SUBDOC_HEADS_FILE = "subdoc_heads.json"
     FILEMETA_FILE = "shared_folders.json"
     MIRROR_BASE_DIR = "repos"
     LOCAL_STATE_FILE = "local_state.json"
@@ -177,12 +180,13 @@ class PersistenceManager:
 
         # In-memory storage for state (these will be loaded/saved per relay)
         self.document_hashes: Dict[str, Dict[str, str]] = {}  # keyed by relay_id then doc_id
-        self.filemeta_folders: Dict[
-            str, Dict[str, Dict]
-        ] = {}  # keyed by relay_id then folder doc_id
-        self.local_file_state: Dict[
-            str, Dict[str, Dict]
-        ] = {}  # keyed by relay_id then folder_id then path
+        self.subdoc_heads: Dict[str, Dict[str, str]] = {}  # keyed by relay_id then doc_id
+        self.filemeta_folders: Dict[str, Dict[str, Dict]] = (
+            {}
+        )  # keyed by relay_id then folder doc_id
+        self.local_file_state: Dict[str, Dict[str, Dict]] = (
+            {}
+        )  # keyed by relay_id then folder_id then path
 
         # In-memory resource index (built from existing data sources)
         self.resource_index: Dict[str, Dict[str, Dict]] = {}  # keyed by relay_id then resource_id
@@ -202,6 +206,9 @@ class PersistenceManager:
 
     def get_hashes_file_path(self, relay_id: str) -> str:
         return os.path.join(self.get_state_dir(relay_id), self.HASHES_FILE)
+
+    def get_subdoc_heads_file_path(self, relay_id: str) -> str:
+        return os.path.join(self.get_state_dir(relay_id), self.SUBDOC_HEADS_FILE)
 
     def get_filemeta_file_path(self, relay_id: str) -> str:
         return os.path.join(self.get_state_dir(relay_id), self.FILEMETA_FILE)
@@ -325,10 +332,9 @@ class PersistenceManager:
         return self.git_config.get_connector_for_folder(relay_id, folder_id) is not None
 
     def should_sync_folder(self, relay_id: str, folder_id: str) -> bool:
-        configured_folder_ids = self._configured_folder_ids(relay_id)
-        if not configured_folder_ids:
+        if not self.git_config.connectors:
             return True
-        return folder_id in configured_folder_ids
+        return self.is_folder_configured(relay_id, folder_id)
 
     def _configured_folder_ids(self, relay_id: str) -> set[str]:
         return {
@@ -442,9 +448,7 @@ class PersistenceManager:
         logger.info(f"Global SSH setup - Using SSH command: {ssh_command}")
         logger.info(f"Global SSH setup - Private key: {private_key_path}")
         if self.ssh_key_manager.known_hosts:
-            logger.info(
-                f"Global SSH setup - Known hosts: {self.ssh_key_manager.known_hosts_path}"
-            )
+            logger.info(f"Global SSH setup - Known hosts: {self.ssh_key_manager.known_hosts_path}")
         else:
             logger.info("Global SSH setup - Known hosts handled by system defaults or run.sh")
 
@@ -545,10 +549,12 @@ class PersistenceManager:
         return base_path
 
     def load_persistent_data(self, relay_id: str):
-        """Load document hashes, filemeta, and local state for a specific relay"""
+        """Load document hashes, subdoc heads, filemeta, and local state."""
         # Ensure relay exists in data structures
         if relay_id not in self.document_hashes:
             self.document_hashes[relay_id] = {}
+        if relay_id not in self.subdoc_heads:
+            self.subdoc_heads[relay_id] = {}
         if relay_id not in self.filemeta_folders:
             self.filemeta_folders[relay_id] = {}
         if relay_id not in self.local_file_state:
@@ -568,6 +574,16 @@ class PersistenceManager:
             except Exception as e:
                 logger.error(f"Error loading document hashes for relay {relay_id}: {e}")
                 self.document_hashes[relay_id] = {}
+
+        # Load subdocument index heads
+        subdoc_heads_path = self.get_subdoc_heads_file_path(relay_id)
+        if os.path.exists(subdoc_heads_path):
+            try:
+                with open(subdoc_heads_path, "r") as f:
+                    self.subdoc_heads[relay_id] = json.load(f)
+            except Exception as e:
+                logger.error(f"Error loading subdoc heads for relay {relay_id}: {e}")
+                self.subdoc_heads[relay_id] = {}
 
         # Load filemeta
         filemeta_path = self.get_filemeta_file_path(relay_id)
@@ -602,7 +618,7 @@ class PersistenceManager:
         os.replace(temp_path, path)
 
     def save_persistent_data(self, relay_id: str):
-        """Save document hashes, filemeta, and local state for a specific relay"""
+        """Save document hashes, subdoc heads, filemeta, and local state."""
         # Ensure state directory exists
         os.makedirs(self.get_state_dir(relay_id), exist_ok=True)
 
@@ -612,6 +628,14 @@ class PersistenceManager:
             )
         except Exception as e:
             logger.error(f"Error saving document hashes for relay {relay_id}: {e}")
+
+        try:
+            self._write_json_atomic(
+                self.get_subdoc_heads_file_path(relay_id),
+                self.subdoc_heads.get(relay_id, {}),
+            )
+        except Exception as e:
+            logger.error(f"Error saving subdoc heads for relay {relay_id}: {e}")
 
         try:
             self._write_json_atomic(
@@ -880,7 +904,9 @@ class PersistenceManager:
             return remote_commit.hexsha != current_branch.commit.hexsha
 
         try:
-            ahead = git_repo.git.rev_list("--count", f"{tracking_branch.name}..{current_branch.name}")
+            ahead = git_repo.git.rev_list(
+                "--count", f"{tracking_branch.name}..{current_branch.name}"
+            )
             return int(ahead) > 0
         except Exception as e:
             logger.debug(f"Could not determine unpushed commit state: {e}")
@@ -1132,8 +1158,7 @@ class PersistenceManager:
             raise git.exc.GitCommandError(
                 ["git", "push"],
                 1,
-                stderr="push rejected: "
-                + "; ".join(info.summary.strip() for info in failed),
+                stderr="push rejected: " + "; ".join(info.summary.strip() for info in failed),
             )
 
     def _push_to_remote(self, repo_key: str, git_repo: git.Repo):
@@ -1439,11 +1464,11 @@ class PersistenceManager:
 
             relay_index = self.resource_index[relay_id]
             relay_index.clear()  # Rebuild from scratch
-            configured_folder_ids = self._configured_folder_ids(relay_id)
+            restrict_to_configured_folders = bool(self.git_config.connectors)
 
             # Index folders from filemeta_folders
             for folder_id in self.filemeta_folders.get(relay_id, {}).keys():
-                if configured_folder_ids and folder_id not in configured_folder_ids:
+                if not self.should_sync_folder(relay_id, folder_id):
                     continue
 
                 relay_index[folder_id] = {
@@ -1455,7 +1480,7 @@ class PersistenceManager:
 
             # Index documents from local_file_state (the authoritative source)
             for folder_id, folder_state in self.local_file_state.get(relay_id, {}).items():
-                if configured_folder_ids and folder_id not in configured_folder_ids:
+                if not self.should_sync_folder(relay_id, folder_id):
                     continue
 
                 for path, file_info in folder_state.items():
@@ -1487,7 +1512,7 @@ class PersistenceManager:
 
             # Index documents from filemeta_folders (includes documents not yet synced to disk)
             for folder_id, filemeta in self.filemeta_folders.get(relay_id, {}).items():
-                if configured_folder_ids and folder_id not in configured_folder_ids:
+                if not self.should_sync_folder(relay_id, folder_id):
                     continue
 
                 for path, metadata in filemeta.items():
@@ -1514,6 +1539,9 @@ class PersistenceManager:
                             }
 
             # Index documents from document_hashes (may include standalone documents)
+            if restrict_to_configured_folders:
+                return
+
             for doc_id in self.document_hashes.get(relay_id, {}).keys():
                 # Skip compound IDs - they're legacy and should be ignored
                 if "-" in doc_id and len(doc_id.split("-")) > 5:

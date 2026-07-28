@@ -3,7 +3,6 @@ from typing import Any, Dict, List
 
 import requests
 
-
 DEFAULT_TIMEOUT_SECONDS = 10
 KNOWN_HOST_KEY_TYPES = ("ssh-ed25519", "ecdsa-sha2-nistp256", "ssh-rsa")
 

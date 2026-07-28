@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 
 import re
-from typing import Union, Protocol
 from abc import ABC
-
+from typing import Protocol, Union
 
 UUID = str
 
