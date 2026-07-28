@@ -677,6 +677,7 @@ class PersistenceManager:
 
             # If repo exists and has remotes, pull latest changes
             git_repo = self.git_repos[repo_key]
+            self._ensure_configured_branch(repo_key, git_repo)
             if git_repo.remotes:
                 self._pull_from_remote(repo_key, git_repo)
 
@@ -724,6 +725,49 @@ class PersistenceManager:
 
         return self.git_repos[repo_key]
 
+    def _ensure_configured_branch(self, repo_key: str, git_repo: git.Repo):
+        """Reattach a detached HEAD without changing the index or working tree."""
+        if not git_repo.head.is_detached:
+            return git_repo.active_branch
+
+        try:
+            relay_id, folder_id = repo_key.split("/", 1)
+        except ValueError:
+            relay_id = folder_id = ""
+
+        connector = self.git_config.get_connector_for_folder(relay_id, folder_id)
+        if connector:
+            branch_name = connector.branch
+        elif len(git_repo.heads) == 1:
+            branch_name = git_repo.heads[0].name
+        else:
+            branch_name = "main"
+
+        detached_commit = git_repo.head.commit
+        target_branch = next(
+            (branch for branch in git_repo.heads if branch.name == branch_name),
+            None,
+        )
+        if target_branch is None:
+            target_branch = git_repo.create_head(branch_name, detached_commit)
+        elif target_branch.commit != detached_commit:
+            # Preserve the old branch tip before moving the configured branch
+            # to the detached worktree's commit. This keeps both histories
+            # recoverable while allowing normal pull/push recovery to resume.
+            recovery_name = (
+                f"recovery/{branch_name.replace('/', '-')}-{target_branch.commit.hexsha[:12]}"
+            )
+            if recovery_name not in [branch.name for branch in git_repo.heads]:
+                git_repo.create_head(recovery_name, target_branch.commit)
+            target_branch.set_commit(detached_commit)
+
+        git_repo.head.reference = target_branch
+        logger.warning(
+            f"Reattached detached HEAD for {repo_key} to {branch_name} "
+            f"at {detached_commit.hexsha[:12]}"
+        )
+        return target_branch
+
     def configure_git_remote(
         self, relay_id: str, folder_id: str, remote_url: str, remote_name: str = "origin"
     ):
@@ -734,6 +778,8 @@ class PersistenceManager:
             if not git_repo:
                 logger.error(f"No git repository found for folder {folder_id} in relay {relay_id}")
                 return False
+
+            self._ensure_configured_branch(repo_key, git_repo)
 
             # Check if remote already exists
             if remote_name in [r.name for r in git_repo.remotes]:
@@ -840,6 +886,8 @@ class PersistenceManager:
                     logger.info(f"Skipping commit for unconfigured repository {repo_key}")
                     continue
 
+                self._ensure_configured_branch(repo_key, git_repo)
+
                 if git_repo.is_dirty() or git_repo.untracked_files:
                     # Pull latest changes before committing if remote is configured
                     if git_repo.remotes:
@@ -872,6 +920,7 @@ class PersistenceManager:
             return False
 
     def _has_unpushed_commits(self, repo_key: str, git_repo: git.Repo) -> bool:
+        self._ensure_configured_branch(repo_key, git_repo)
         try:
             current_branch = git_repo.active_branch
         except (TypeError, ValueError):
@@ -966,6 +1015,8 @@ class PersistenceManager:
     def _pull_from_remote(self, repo_key: str, git_repo: git.Repo):
         """Pull latest changes from remote repository using rebase"""
         try:
+            self._ensure_configured_branch(repo_key, git_repo)
+
             # Check if any remotes are configured
             if not git_repo.remotes:
                 logger.debug(f"No remotes configured for repository {repo_key}, skipping pull")
@@ -1170,6 +1221,8 @@ class PersistenceManager:
     def _push_to_remote(self, repo_key: str, git_repo: git.Repo):
         """Push commits to remote repository if configured"""
         try:
+            self._ensure_configured_branch(repo_key, git_repo)
+
             # Check if any remotes are configured
             if not git_repo.remotes:
                 logger.debug(f"No remotes configured for repository {repo_key}, skipping push")

@@ -996,3 +996,32 @@ class TestOutOfBandPushRecovery:
 
         with pytest.raises(git.exc.GitCommandError, match="rejected"):
             self.pm._push_and_verify(self.mine.remotes.origin)
+
+    def test_detached_head_reattaches_to_configured_branch_without_losing_commit(self):
+        original_main = self.mine.heads.main.commit
+        self.mine.git.checkout("--detach")
+        with open(os.path.join(self.mine_path, "detached.md"), "w") as f:
+            f.write("detached work\n")
+        self.mine.git.add(A=True)
+        detached_commit = self.mine.index.commit("detached work")
+        assert self.mine.head.is_detached
+
+        branch = self.pm._ensure_configured_branch(self.repo_key, self.mine)
+
+        assert not self.mine.head.is_detached
+        assert self.mine.active_branch.name == "main"
+        assert branch.commit == detached_commit
+        assert self.mine.head.commit == detached_commit
+        recovery = self.mine.heads[f"recovery/main-{original_main.hexsha[:12]}"]
+        assert recovery.commit == original_main
+
+    def test_commit_cycle_recovers_detached_head_and_pushes(self):
+        self.mine.git.checkout("--detach")
+        with open(os.path.join(self.mine_path, "detached-sync.md"), "w") as f:
+            f.write("detached work\n")
+
+        assert self.pm.commit_changes()
+
+        assert not self.mine.head.is_detached
+        assert self.mine.active_branch.name == "main"
+        assert self._reached_remote(self.mine.head.commit.hexsha)
