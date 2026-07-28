@@ -56,16 +56,21 @@ class SSHKeyManager:
             raise ValueError(f"Environment variable {self.ssh_key_env_var} not found")
 
         try:
+            # Shell command substitution and several secret stores strip the
+            # trailing newline from multiline values. OpenSSH's libcrypto
+            # loader rejects otherwise-valid private keys without it.
+            normalized_ssh_key = ssh_key.rstrip("\r\n") + "\n"
+
             # Create SSH directory
             os.makedirs(self.ssh_dir, mode=0o700, exist_ok=True)
 
             # Write private key to file
             with open(self.private_key_path, "w") as f:
-                f.write(ssh_key)
+                f.write(normalized_ssh_key)
             os.chmod(self.private_key_path, 0o600)  # Read-only for owner
 
             # Generate and write public key
-            public_key = self._extract_public_key(ssh_key)
+            public_key = self._extract_public_key(normalized_ssh_key)
             with open(self.public_key_path, "w") as f:
                 f.write(public_key + "\n")
             os.chmod(self.public_key_path, 0o644)  # Read for owner and group
@@ -430,6 +435,7 @@ class PersistenceManager:
         # Set up SSH command to use the key file.
         ssh_options = [
             "-o LogLevel=ERROR",
+            "-o IdentitiesOnly=yes",
             "-o PasswordAuthentication=no",
             "-o PreferredAuthentications=publickey",
             "-o ConnectTimeout=10",

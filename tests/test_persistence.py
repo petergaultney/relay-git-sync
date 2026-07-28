@@ -759,6 +759,17 @@ class TestSSHKeyManager:
             content = f.read()
         assert content == self.test_private_pem
 
+    def test_restores_trailing_newline_stripped_by_secret_store(self):
+        os.environ["SSH_PRIVATE_KEY"] = self.test_private_pem.rstrip("\r\n")
+
+        ssh_manager = SSHKeyManager(self.temp_dir)
+
+        with open(ssh_manager.private_key_path, "rb") as f:
+            content = f.read()
+        assert content.endswith(b"\n")
+        assert not content.endswith(b"\n\n")
+        assert ssh_manager.get_public_key().startswith("ssh-rsa ")
+
     def test_get_public_key_extracts_from_private(self):
         """Test extracting public key from private key"""
         ssh_manager = SSHKeyManager(self.temp_dir)
@@ -801,6 +812,7 @@ url = "https://auth.system3.dev"
         ssh_command = os.environ["GIT_SSH_COMMAND"]
         assert f"UserKnownHostsFile={persistence.ssh_key_manager.known_hosts_path}" in ssh_command
         assert "StrictHostKeyChecking=yes" in ssh_command
+        assert "IdentitiesOnly=yes" in ssh_command
 
     def test_persistence_uses_inferred_github_known_hosts_file(self):
         """Test GitHub SSH remotes get provider known host keys"""
