@@ -91,6 +91,7 @@ url = "git@github.com:example/repository.git"
             raise KnownHostKeyFetchError("provider endpoint unavailable")
 
         monkeypatch.setattr("git_config.fetch_known_hosts_for_host", fail_fetch_known_hosts)
+        monkeypatch.setattr("git_config.bundled_known_hosts_for_host", lambda host: [])
         config_path = self._write_config(
             f"""
 [relay]
@@ -109,6 +110,31 @@ url = "git@github.com:example/repository.git"
             "Unable to fetch known_hosts for SSH host in git_connector[0]: "
             "github.com: provider endpoint unavailable"
         ]
+
+    def test_hosted_provider_fetch_failure_falls_back_to_bundled_known_hosts(self, monkeypatch):
+        bundled_entry = "github.com ssh-ed25519 AAAABundledHostKey"
+
+        def fail_fetch_known_hosts(host):
+            raise KnownHostKeyFetchError("provider endpoint unavailable")
+
+        monkeypatch.setattr("git_config.fetch_known_hosts_for_host", fail_fetch_known_hosts)
+        monkeypatch.setattr("git_config.bundled_known_hosts_for_host", lambda host: [bundled_entry])
+        config_path = self._write_config(
+            f"""
+[relay]
+id = "{self.relay_id}"
+url = "https://auth.system3.dev"
+
+[[git_connector]]
+shared_folder_id = "{self.folder_id}"
+url = "git@github.com:example/repository.git"
+"""
+        )
+
+        config = GitConnectorConfig(config_path)
+
+        assert config.validate_config() == []
+        assert config.known_hosts == [bundled_entry]
 
     def test_hosted_provider_fetch_failure_falls_back_to_cached_known_hosts(self, monkeypatch):
         cached_entry = "github.com ssh-ed25519 AAAACachedHostKey"

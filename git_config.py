@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from git_host_keys import (
     KnownHostKeyFetchError,
+    bundled_known_hosts_for_host,
     dedupe_preserving_order,
     fetch_known_hosts_for_host,
     is_known_provider_host,
@@ -113,7 +114,12 @@ def _known_hosts_entries_for_urls(
                 logger.warning(f"Using cached known_hosts for {host} after fetch failure: {e}")
                 entries.extend(cached_entries)
             else:
-                errors[host] = str(e)
+                bundled_entries = bundled_known_hosts_for_host(host)
+                if known_hosts_cover_host(bundled_entries, host):
+                    logger.warning(f"Using bundled known_hosts for {host} after fetch failure: {e}")
+                    entries.extend(bundled_entries)
+                else:
+                    errors[host] = str(e)
             continue
 
         entries.extend(host_entries)
