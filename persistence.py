@@ -40,6 +40,18 @@ class _AuthorBucket(NamedTuple):
     co_authors: Set[GitAuthor]
 
 
+class _GroupedChanges(NamedTuple):
+    groups: Dict[GitAuthor, _AuthorBucket]
+    deferred_deletions: List[str]
+
+
+# Relay delivers a rename as a delete event and a create event, which can land
+# many seconds apart - across commit cycles. Hold an unpaired deletion out of
+# commits this long so its byte-identical re-add can join it in one commit
+# (which is what lets git detect the rename).
+DELETION_PAIRING_WINDOW_S = 90.0
+
+
 class SSHKeyManager:
     """Manage SSH keys for git authentication using key files"""
 
@@ -162,6 +174,7 @@ class PersistenceManager:
         # Set by the app after construction; when present, commits are grouped
         # per author of the changed content (see commit_changes).
         self.author_resolver: Optional[AuthorResolver] = None
+        self._deletion_first_seen: Dict[str, float] = {}  # "repo_key:path" -> monotonic time
         self.git_repos: Dict[str, git.Repo] = {}  # Now keyed by "relay_id/folder_id"
         self.git_lock = threading.Lock()  # Prevent concurrent git operations
         # Last fetch time per repo for the unpushed-commit check, keyed by repo_key
@@ -898,9 +911,7 @@ class PersistenceManager:
             if item.change_type == "D" and item.a_path.endswith(".md")
         ]
 
-    def _group_changes_by_author(
-        self, repo_key: str, git_repo: git.Repo
-    ) -> Dict[GitAuthor, _AuthorBucket]:
+    def _group_changes_by_author(self, repo_key: str, git_repo: git.Repo) -> _GroupedChanges:
         """Group this repo's changed markdown files by the dominant author of their changes.
 
         Files whose author cannot be resolved (no doc mapping, deletion-only
@@ -908,10 +919,12 @@ class PersistenceManager:
         fall through to the default-identity commit. A deletion whose HEAD
         content byte-matches a new file's content is the old half of a rename;
         it joins the new path's bucket so git's rename detection can connect
-        the history across the commit.
+        the history across the commit. An unpaired deletion younger than
+        DELETION_PAIRING_WINDOW_S is deferred - kept out of every commit -
+        in case its other half hasn't arrived from Relay yet.
         """
         if self.author_resolver is None or not self.author_resolver.authors:
-            return {}
+            return _GroupedChanges({}, [])
 
         started = time.monotonic()
         relay_id, folder_id = repo_key.split("/", 1)
@@ -965,7 +978,12 @@ class PersistenceManager:
             if repo_path in untracked:
                 new_content_author[hashlib.sha256(new_content.encode()).hexdigest()] = authors[0]
 
-        for deleted in self._deleted_markdown_paths(git_repo):
+        deleted_paths = self._deleted_markdown_paths(git_repo)
+        deferred: List[str] = []
+        for deleted in deleted_paths:
+            first_seen = self._deletion_first_seen.setdefault(
+                f"{repo_key}:{deleted}", time.monotonic()
+            )
             try:
                 content = git_repo.head.commit.tree[deleted].data_stream.read().decode("utf-8")
             except (KeyError, UnicodeDecodeError, ValueError):
@@ -974,6 +992,17 @@ class PersistenceManager:
             author = new_content_author.get(hashlib.sha256(content.encode()).hexdigest())
             if author:
                 groups[author].paths.append(deleted)
+            elif time.monotonic() - first_seen < DELETION_PAIRING_WINDOW_S:
+                deferred.append(deleted)
+
+        # forget deletions that are no longer pending (committed or resurrected)
+        still_deleted = {f"{repo_key}:{p}" for p in deleted_paths}
+        for key in [
+            k
+            for k in self._deletion_first_seen
+            if k.startswith(f"{repo_key}:") and k not in still_deleted
+        ]:
+            del self._deletion_first_seen[key]
 
         elapsed = time.monotonic() - started
         if elapsed > 5.0:
@@ -982,7 +1011,7 @@ class PersistenceManager:
                 f"({len(changed_paths)} changed markdown files); "
                 f"commits are delayed while this runs"
             )
-        return groups
+        return _GroupedChanges(groups, deferred)
 
     def commit_changes(self) -> bool:
         """Commit changes to git repositories if there are any, and push to remote if configured
@@ -1009,9 +1038,10 @@ class PersistenceManager:
 
                     # One commit per dominant author of the changed content
                     # (with co-author trailers for other contributors), then a
-                    # default-identity commit for whatever remains (unpaired
+                    # default-identity commit for whatever remains (released
                     # deletions, unattributable files, non-markdown).
-                    for author, bucket in self._group_changes_by_author(repo_key, git_repo).items():
+                    grouped = self._group_changes_by_author(repo_key, git_repo)
+                    for author, bucket in grouped.groups.items():
                         msg = commit_msg
                         co_authors = sorted(bucket.co_authors - {author}, key=lambda a: a.email)
                         if co_authors:
@@ -1032,6 +1062,14 @@ class PersistenceManager:
                         committed_any = True
 
                     self._safe_git_operation(lambda: git_repo.git.add(A=True))
+                    if grouped.deferred_deletions and git_repo.head.is_valid():
+                        # unstage young unpaired deletions - their re-add half
+                        # may still arrive; see DELETION_PAIRING_WINDOW_S
+                        self._safe_git_operation(
+                            lambda: git_repo.git.reset(
+                                "-q", "HEAD", "--", *grouped.deferred_deletions
+                            )
+                        )
                     if not git_repo.head.is_valid() or git_repo.index.diff("HEAD"):
                         self._safe_git_operation(lambda: git_repo.index.commit(commit_msg))
                         print(f"Git commit for repository {repo_key}: {commit_msg}")

@@ -173,6 +173,73 @@ def test_shared_file_gets_co_author_trailer():
         shutil.rmtree(temp_dir)
 
 
+def test_rename_split_across_cycles_still_commits_atomically():
+    """Relay sends a rename as delete + create events, sometimes in different
+    commit cycles. The unpaired deletion must be deferred, not committed."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        persistence = make_persistence(temp_dir)
+        repo = make_repo(temp_dir)
+        persistence.git_repos = {REPO_KEY: repo}
+        persistence._push_to_remote = MagicMock()
+        persistence._ensure_configured_branch = MagicMock()
+        persistence._pull_from_remote = MagicMock()
+        persistence.local_file_state = {RELAY_ID: {FOLDER_ID: {}}}
+        persistence.author_resolver = AuthorResolver(
+            lambda resource: [{"text": "original line\n", "client_id": 1, "user": "user-ada"}],
+            {"user-ada": ADA},
+        )
+
+        # cycle 1: only the delete half has arrived
+        os.remove(os.path.join(repo.working_dir, PREFIX, "existing.md"))
+        assert persistence.commit_changes() is False  # deferred, nothing committed
+        assert len(list(repo.iter_commits("main"))) == 1
+        assert repo.head.commit.tree[f"{PREFIX}/existing.md"]  # deletion not yet committed
+
+        # cycle 2: the create half arrives
+        write(repo, f"{PREFIX}/renamed.md", "original line\n")
+        persistence.local_file_state = {
+            RELAY_ID: {FOLDER_ID: {"/renamed.md": {"doc_id": "doc-ada", "type": "markdown"}}}
+        }
+        assert persistence.commit_changes() is True
+
+        commits = list(repo.iter_commits("main"))
+        assert len(commits) == 2
+        assert commits[0].author.email == ADA.email
+        assert "R100" in repo.git.diff("HEAD~1", "HEAD", "-M", "--name-status")
+        assert not repo.is_dirty(untracked_files=True)
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_unpaired_deletion_released_after_window(monkeypatch):
+    import persistence as persistence_module
+
+    monkeypatch.setattr(persistence_module, "DELETION_PAIRING_WINDOW_S", 0.0)
+    temp_dir = tempfile.mkdtemp()
+    try:
+        persistence = make_persistence(temp_dir)
+        repo = make_repo(temp_dir)
+        persistence.git_repos = {REPO_KEY: repo}
+        persistence._push_to_remote = MagicMock()
+        persistence._ensure_configured_branch = MagicMock()
+        persistence._pull_from_remote = MagicMock()
+        persistence.local_file_state = {RELAY_ID: {FOLDER_ID: {}}}
+        persistence.author_resolver = AuthorResolver(
+            lambda resource: [], {"user-ada": ADA}
+        )
+
+        os.remove(os.path.join(repo.working_dir, PREFIX, "existing.md"))
+        assert persistence.commit_changes() is True  # window expired: bot commits it
+
+        commits = list(repo.iter_commits("main"))
+        assert len(commits) == 2
+        assert commits[0].author.email == "bot@example.com"
+        assert not repo.is_dirty(untracked_files=True)
+    finally:
+        shutil.rmtree(temp_dir)
+
+
 def test_commit_changes_without_resolver_is_single_commit():
     temp_dir = tempfile.mkdtemp()
     try:
