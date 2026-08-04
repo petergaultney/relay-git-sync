@@ -8,6 +8,7 @@ from git_config import resolve_relay_id, resolve_relay_url, resolve_webhook_url
 from operations_queue import OperationsQueue
 from persistence import PersistenceManager
 from relay_auth import generate_setup, print_setup
+import attribution
 from relay_client import RelayClient
 from sync_engine import SyncEngine
 from web_server import create_server
@@ -117,6 +118,12 @@ def run_server(
         # Initialize components
         relay_client = RelayClient(relay_server_url, relay_server_api_key)
         persistence_manager = PersistenceManager(data_dir, git_config_file)
+        authors = attribution.parse_authors(persistence_manager.git_config.authors)
+        if authors:
+            persistence_manager.author_resolver = attribution.AuthorResolver(
+                relay_client.fetch_attributed_spans, authors
+            )
+            print(f"Per-author commits enabled for {len(authors)} configured authors")
         sync_engine = SyncEngine(data_dir, relay_client, persistence_manager)
         webhook_processor = WebhookProcessor(relay_client)
         operations_queue = OperationsQueue(sync_engine, commit_interval)

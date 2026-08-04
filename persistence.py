@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import git
 
+from attribution import AuthorResolver, GitAuthor
 from git_config import GitConnectorConfig, default_git_config_file
 from models import get_s3rn_resource_category
 from s3rn import (
@@ -149,6 +150,9 @@ class PersistenceManager:
 
     def __init__(self, data_dir: str = ".", git_config_file: Optional[str] = None):
         self.data_dir = data_dir
+        # Set by the app after construction; when present, commits are grouped
+        # per author of the changed content (see commit_changes).
+        self.author_resolver: Optional[AuthorResolver] = None
         self.git_repos: Dict[str, git.Repo] = {}  # Now keyed by "relay_id/folder_id"
         self.git_lock = threading.Lock()  # Prevent concurrent git operations
         # Last fetch time per repo for the unpushed-commit check, keyed by repo_key
@@ -872,6 +876,66 @@ class PersistenceManager:
 
         return pushed_count
 
+    def _changed_markdown_paths(self, git_repo: git.Repo) -> List[str]:
+        """Repo-relative paths of modified/untracked .md files (no deletions)."""
+        changed = [item.a_path for item in git_repo.index.diff(None) if item.change_type != "D"]
+        return [p for p in changed + list(git_repo.untracked_files) if p.endswith(".md")]
+
+    def _group_changes_by_author(
+        self, repo_key: str, git_repo: git.Repo
+    ) -> Dict[GitAuthor, List[str]]:
+        """Group this repo's changed markdown files by the author of their changes.
+
+        Files whose author cannot be resolved (no doc mapping, deletion-only
+        change, unmapped user, endpoint unavailable) are simply not grouped and
+        fall through to the default-identity commit.
+        """
+        if self.author_resolver is None or not self.author_resolver.authors:
+            return {}
+
+        started = time.monotonic()
+        relay_id, folder_id = repo_key.split("/", 1)
+        connector = self.git_config.get_connector_for_folder(relay_id, folder_id)
+        prefix = (connector.prefix.strip("/") + "/") if connector and connector.prefix else ""
+        folder_files = self.local_file_state.get(relay_id, {}).get(folder_id, {})
+
+        changed_paths = self._changed_markdown_paths(git_repo)
+        groups: Dict[GitAuthor, List[str]] = {}
+        for repo_path in changed_paths:
+            if prefix and not repo_path.startswith(prefix):
+                continue
+
+            vault_path = repo_path[len(prefix) :]
+            doc_id = (folder_files.get(vault_path) or {}).get("doc_id")
+            if not doc_id:
+                continue
+
+            try:
+                old_content = git_repo.git.show(f"HEAD:{repo_path}")
+            except git.GitCommandError:
+                old_content = ""  # new file
+            try:
+                with open(os.path.join(git_repo.working_dir, repo_path), encoding="utf-8") as f:
+                    new_content = f.read()
+            except OSError as e:
+                logger.warning(f"Could not read {repo_path} for attribution: {e}")
+                continue
+
+            author = self.author_resolver.resolve(
+                S3RemoteDocument(relay_id, folder_id, doc_id), old_content, new_content
+            )
+            if author:
+                groups.setdefault(author, []).append(repo_path)
+
+        elapsed = time.monotonic() - started
+        if elapsed > 5.0:
+            logger.warning(
+                f"Author attribution for {repo_key} took {elapsed:.1f}s "
+                f"({len(changed_paths)} changed markdown files); "
+                f"commits are delayed while this runs"
+            )
+        return groups
+
     def commit_changes(self) -> bool:
         """Commit changes to git repositories if there are any, and push to remote if configured
 
@@ -893,17 +957,29 @@ class PersistenceManager:
                     if git_repo.remotes:
                         self._pull_from_remote(repo_key, git_repo)
 
-                    # Add all changes using safe git operation
+                    commit_msg = f"Auto-sync: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+
+                    # One commit per resolved author of the changed content,
+                    # then a default-identity commit for whatever remains
+                    # (deletions, unattributable files, non-markdown).
+                    for author, paths in self._group_changes_by_author(repo_key, git_repo).items():
+                        self._safe_git_operation(lambda: git_repo.git.add("--", *paths))
+                        self._safe_git_operation(
+                            lambda: git_repo.index.commit(
+                                commit_msg, author=git.Actor(author.name, author.email)
+                            )
+                        )
+                        print(
+                            f"Git commit for repository {repo_key}: {commit_msg} "
+                            f"(author: {author.name}, {len(paths)} files)"
+                        )
+                        committed_any = True
+
                     self._safe_git_operation(lambda: git_repo.git.add(A=True))
-
-                    # Create commit message
-                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-                    commit_msg = f"Auto-sync: {timestamp}"
-
-                    # Commit changes using safe git operation
-                    self._safe_git_operation(lambda: git_repo.index.commit(commit_msg))
-                    print(f"Git commit for repository {repo_key}: {commit_msg}")
-                    committed_any = True
+                    if not git_repo.head.is_valid() or git_repo.index.diff("HEAD"):
+                        self._safe_git_operation(lambda: git_repo.index.commit(commit_msg))
+                        print(f"Git commit for repository {repo_key}: {commit_msg}")
+                        committed_any = True
 
                     # Push to remote if configured
                     self._push_to_remote(repo_key, git_repo)
