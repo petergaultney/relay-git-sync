@@ -905,7 +905,7 @@ class PersistenceManager:
             if prefix and not repo_path.startswith(prefix):
                 continue
 
-            vault_path = repo_path[len(prefix) :]
+            vault_path = "/" + repo_path[len(prefix) :]
             doc_id = (folder_files.get(vault_path) or {}).get("doc_id")
             if not doc_id:
                 continue

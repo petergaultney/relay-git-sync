@@ -76,8 +76,8 @@ def test_commit_changes_groups_by_author():
         persistence.local_file_state = {
             RELAY_ID: {
                 FOLDER_ID: {
-                    "existing.md": {"doc_id": "doc-ada", "type": "markdown"},
-                    "new-note.md": {"doc_id": "doc-bob", "type": "markdown"},
+                    "/existing.md": {"doc_id": "doc-ada", "type": "markdown"},
+                    "/new-note.md": {"doc_id": "doc-bob", "type": "markdown"},
                 }
             }
         }
