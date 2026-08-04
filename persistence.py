@@ -2,6 +2,7 @@
 
 import atexit
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ import subprocess
 import threading
 import time
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Set
 
 import git
 
@@ -29,6 +30,13 @@ from s3rn import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _AuthorBucket(NamedTuple):
+    """One pending commit: the dominant author's files plus any co-authors."""
+
+    paths: List[str]
+    co_authors: Set[GitAuthor]
 
 
 class SSHKeyManager:
@@ -881,14 +889,25 @@ class PersistenceManager:
         changed = [item.a_path for item in git_repo.index.diff(None) if item.change_type != "D"]
         return [p for p in changed + list(git_repo.untracked_files) if p.endswith(".md")]
 
+    def _deleted_markdown_paths(self, git_repo: git.Repo) -> List[str]:
+        """Repo-relative paths of .md files deleted from the working tree."""
+        return [
+            item.a_path
+            for item in git_repo.index.diff(None)
+            if item.change_type == "D" and item.a_path.endswith(".md")
+        ]
+
     def _group_changes_by_author(
         self, repo_key: str, git_repo: git.Repo
-    ) -> Dict[GitAuthor, List[str]]:
-        """Group this repo's changed markdown files by the author of their changes.
+    ) -> Dict[GitAuthor, _AuthorBucket]:
+        """Group this repo's changed markdown files by the dominant author of their changes.
 
         Files whose author cannot be resolved (no doc mapping, deletion-only
         change, unmapped user, endpoint unavailable) are simply not grouped and
-        fall through to the default-identity commit.
+        fall through to the default-identity commit. A deletion whose HEAD
+        content byte-matches a new file's content is the old half of a rename;
+        it joins the new path's bucket so git's rename detection can connect
+        the history across the commit.
         """
         if self.author_resolver is None or not self.author_resolver.authors:
             return {}
@@ -899,8 +918,10 @@ class PersistenceManager:
         prefix = (connector.prefix.strip("/") + "/") if connector and connector.prefix else ""
         folder_files = self.local_file_state.get(relay_id, {}).get(folder_id, {})
 
+        untracked = set(git_repo.untracked_files)
         changed_paths = self._changed_markdown_paths(git_repo)
-        groups: Dict[GitAuthor, List[str]] = {}
+        groups: Dict[GitAuthor, _AuthorBucket] = {}
+        new_content_author: Dict[str, GitAuthor] = {}  # sha256 of new file content -> author
         for repo_path in changed_paths:
             if prefix and not repo_path.startswith(prefix):
                 continue
@@ -921,11 +942,27 @@ class PersistenceManager:
                 logger.warning(f"Could not read {repo_path} for attribution: {e}")
                 continue
 
-            author = self.author_resolver.resolve(
+            authors = self.author_resolver.resolve(
                 S3RemoteDocument(relay_id, folder_id, doc_id), old_content, new_content
             )
+            if not authors:
+                continue
+
+            bucket = groups.setdefault(authors[0], _AuthorBucket([], set()))
+            bucket.paths.append(repo_path)
+            bucket.co_authors.update(authors[1:])
+            if repo_path in untracked:
+                new_content_author[hashlib.sha256(new_content.encode()).hexdigest()] = authors[0]
+
+        for deleted in self._deleted_markdown_paths(git_repo):
+            try:
+                content = git_repo.head.commit.tree[deleted].data_stream.read().decode("utf-8")
+            except (KeyError, UnicodeDecodeError, ValueError):
+                continue
+
+            author = new_content_author.get(hashlib.sha256(content.encode()).hexdigest())
             if author:
-                groups.setdefault(author, []).append(repo_path)
+                groups[author].paths.append(deleted)
 
         elapsed = time.monotonic() - started
         if elapsed > 5.0:
@@ -959,19 +996,27 @@ class PersistenceManager:
 
                     commit_msg = f"Auto-sync: {time.strftime('%Y-%m-%d %H:%M:%S')}"
 
-                    # One commit per resolved author of the changed content,
-                    # then a default-identity commit for whatever remains
-                    # (deletions, unattributable files, non-markdown).
-                    for author, paths in self._group_changes_by_author(repo_key, git_repo).items():
-                        self._safe_git_operation(lambda: git_repo.git.add("--", *paths))
+                    # One commit per dominant author of the changed content
+                    # (with co-author trailers for other contributors), then a
+                    # default-identity commit for whatever remains (unpaired
+                    # deletions, unattributable files, non-markdown).
+                    for author, bucket in self._group_changes_by_author(repo_key, git_repo).items():
+                        msg = commit_msg
+                        co_authors = sorted(bucket.co_authors - {author}, key=lambda a: a.email)
+                        if co_authors:
+                            msg += "\n\n" + "\n".join(
+                                f"Co-authored-by: {a.name} <{a.email}>" for a in co_authors
+                            )
+                        self._safe_git_operation(lambda: git_repo.git.add("--", *bucket.paths))
                         self._safe_git_operation(
                             lambda: git_repo.index.commit(
-                                commit_msg, author=git.Actor(author.name, author.email)
+                                msg, author=git.Actor(author.name, author.email)
                             )
                         )
                         print(
                             f"Git commit for repository {repo_key}: {commit_msg} "
-                            f"(author: {author.name}, {len(paths)} files)"
+                            f"(author: {author.name}, {len(bucket.paths)} files"
+                            + (f", {len(co_authors)} co-authors)" if co_authors else ")")
                         )
                         committed_any = True
 

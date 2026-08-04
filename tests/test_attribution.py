@@ -1,4 +1,4 @@
-from attribution import AuthorResolver, GitAuthor, dominant_user, parse_author, parse_authors
+from attribution import AuthorResolver, GitAuthor, attributing_users, parse_author, parse_authors
 
 
 def spans(*pairs):
@@ -18,56 +18,71 @@ def test_parse_authors_skips_malformed():
     assert list(parsed) == ["u1"]
 
 
-def test_dominant_user_single_insertion():
+def test_attributing_users_single_insertion():
     old = "hello world"
     new = "hello brave world"
-    assert dominant_user(old, new, spans(("hello ", "ada"), ("brave ", "bob"), ("world", "ada"))) == "bob"
+    assert attributing_users(
+        old, new, spans(("hello ", "ada"), ("brave ", "bob"), ("world", "ada"))
+    ) == ["bob"]
 
 
-def test_dominant_user_picks_majority_of_changed_chars():
+def test_attributing_users_ordered_by_changed_chars():
     old = ""
     new = "aaaaaaaaaa" + "bb"
-    assert dominant_user(old, new, spans(("aaaaaaaaaa", "ada"), ("bb", "bob"))) == "ada"
+    assert attributing_users(old, new, spans(("aaaaaaaaaa", "ada"), ("bb", "bob"))) == [
+        "ada",
+        "bob",
+    ]
 
 
-def test_dominant_user_deletion_only_is_none():
+def test_attributing_users_deletion_only_is_empty():
     old = "hello cruel world"
     new = "hello world"
-    assert dominant_user(old, new, spans(("hello world", "ada"))) is None
+    assert attributing_users(old, new, spans(("hello world", "ada"))) == []
 
 
-def test_dominant_user_mismatched_spans_is_none():
-    assert dominant_user("", "actual content", spans(("stale content", "ada"))) is None
+def test_attributing_users_mismatched_spans_is_empty():
+    assert attributing_users("", "actual content", spans(("stale content", "ada"))) == []
 
 
-def test_dominant_user_unmapped_users_is_none():
-    assert dominant_user("", "xyz", spans(("xyz", None))) is None
+def test_attributing_users_unmapped_users_is_empty():
+    assert attributing_users("", "xyz", spans(("xyz", None))) == []
 
 
-def test_resolver_maps_user_to_configured_author():
+def test_resolver_maps_users_to_configured_authors():
     ada = GitAuthor("Ada", "ada@example.com")
     resolver = AuthorResolver(lambda resource: spans(("new stuff", "u1")), {"u1": ada})
-    assert resolver.resolve(object(), "", "new stuff") == ada
+    assert resolver.resolve(object(), "", "new stuff") == [ada]
 
 
-def test_resolver_unconfigured_user_is_none():
+def test_resolver_orders_dominant_first_and_skips_unconfigured():
+    ada = GitAuthor("Ada", "ada@example.com")
+    bob = GitAuthor("Bob", "bob@example.com")
+    resolver = AuthorResolver(
+        lambda resource: spans(("bbbbbbbbbb", "u2"), ("aaa", "u1"), ("zz", "u3")),
+        {"u1": ada, "u2": bob},
+    )
+    assert resolver.resolve(object(), "", "bbbbbbbbbbaaazz") == [bob, ada]
+
+
+def test_resolver_unconfigured_user_is_empty():
     resolver = AuthorResolver(
         lambda resource: spans(("new stuff", "someone-else")),
         {"u1": GitAuthor("Ada", "ada@example.com")},
     )
-    assert resolver.resolve(object(), "", "new stuff") is None
+    assert resolver.resolve(object(), "", "new stuff") == []
 
 
-def test_resolver_fetch_failure_is_none():
+def test_resolver_fetch_failure_is_empty():
     def boom(resource):
         raise RuntimeError("server down")
 
     resolver = AuthorResolver(boom, {"u1": GitAuthor("Ada", "ada@example.com")})
-    assert resolver.resolve(object(), "", "anything") is None
+    assert resolver.resolve(object(), "", "anything") == []
 
 
 def test_resolver_without_authors_never_fetches():
     def boom(resource):
         raise AssertionError("should not fetch")
 
-    assert AuthorResolver(boom, {}).resolve(object(), "", "anything") is None
+    assert AuthorResolver(boom, {}).resolve(object(), "", "anything") == []

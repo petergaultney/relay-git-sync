@@ -106,6 +106,73 @@ def test_commit_changes_groups_by_author():
         shutil.rmtree(temp_dir)
 
 
+def test_rename_deletion_joins_the_authors_commit():
+    temp_dir = tempfile.mkdtemp()
+    try:
+        persistence = make_persistence(temp_dir)
+        repo = make_repo(temp_dir)
+        persistence.git_repos = {REPO_KEY: repo}
+        persistence._push_to_remote = MagicMock()
+        persistence._ensure_configured_branch = MagicMock()
+
+        os.remove(os.path.join(repo.working_dir, PREFIX, "existing.md"))
+        write(repo, f"{PREFIX}/renamed.md", "original line\n")
+        persistence.local_file_state = {
+            RELAY_ID: {
+                FOLDER_ID: {"/renamed.md": {"doc_id": "doc-ada", "type": "markdown"}}
+            }
+        }
+        persistence.author_resolver = AuthorResolver(
+            lambda resource: [{"text": "original line\n", "client_id": 1, "user": "user-ada"}],
+            {"user-ada": ADA},
+        )
+
+        assert persistence.commit_changes() is True
+
+        commits = list(repo.iter_commits("main"))
+        assert len(commits) == 2  # initial + one attributed commit, no bot sweep
+        assert commits[0].author.email == ADA.email
+        assert "R100" in repo.git.diff("HEAD~1", "HEAD", "-M", "--name-status")
+        assert not repo.is_dirty(untracked_files=True)
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_shared_file_gets_co_author_trailer():
+    temp_dir = tempfile.mkdtemp()
+    try:
+        persistence = make_persistence(temp_dir)
+        repo = make_repo(temp_dir)
+        persistence.git_repos = {REPO_KEY: repo}
+        persistence._push_to_remote = MagicMock()
+        persistence._ensure_configured_branch = MagicMock()
+
+        write(repo, f"{PREFIX}/existing.md", "original line\nada wrote most of this\nbob bit\n")
+        persistence.local_file_state = {
+            RELAY_ID: {
+                FOLDER_ID: {"/existing.md": {"doc_id": "doc-shared", "type": "markdown"}}
+            }
+        }
+        persistence.author_resolver = AuthorResolver(
+            lambda resource: [
+                {"text": "original line\n", "client_id": 1, "user": "user-ada"},
+                {"text": "ada wrote most of this\n", "client_id": 2, "user": "user-ada"},
+                {"text": "bob bit\n", "client_id": 3, "user": "user-bob"},
+            ],
+            {"user-ada": ADA, "user-bob": BOB},
+        )
+
+        assert persistence.commit_changes() is True
+
+        commits = list(repo.iter_commits("main"))
+        assert len(commits) == 2
+        assert commits[0].author.email == ADA.email
+        assert f"Co-authored-by: {BOB.name} <{BOB.email}>" in commits[0].message
+        assert not repo.is_dirty(untracked_files=True)
+    finally:
+        shutil.rmtree(temp_dir)
+
+
 def test_commit_changes_without_resolver_is_single_commit():
     temp_dir = tempfile.mkdtemp()
     try:

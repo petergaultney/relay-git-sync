@@ -2,8 +2,9 @@
 """Resolve the git author for a file change using the relay server's
 attributed-content endpoint (per-span authorship of the doc's current text).
 
-The dominant author of the *changed* characters gets the commit; deletion-only
-changes and unattributable content fall back to the default (bot) identity.
+The dominant author of the *changed* characters gets the commit and any other
+contributors become co-authors; deletion-only changes and unattributable
+content fall back to the default (bot) identity.
 """
 
 import difflib
@@ -75,23 +76,20 @@ def _changed_chars_by_user(
     return counts
 
 
-def dominant_user(old: str, new: str, spans: List[dict]) -> Optional[str]:
-    """The relay user who authored the most changed characters, or None.
+def attributing_users(old: str, new: str, spans: List[dict]) -> List[str]:
+    """Relay users who authored the changed characters, most-changed first.
 
-    None means "no single attributable author": deletion-only change, spans
-    that don't reconstruct `new` (the doc moved on since materialization), or
+    Empty means "no attributable author": deletion-only change, spans that
+    don't reconstruct `new` (the doc moved on since materialization), or
     changed content whose authors are all unmapped in PUD.
     """
     if "".join(span.get("text", "") for span in spans) != new:
         logger.debug("Attributed spans do not reconstruct file content; skipping attribution")
-        return None
+        return []
 
     counts = _changed_chars_by_user(spans, _changed_ranges(old, new))
     counts.pop(None, None)
-    if not counts:
-        return None
-
-    return max(counts, key=lambda user: counts[user])
+    return sorted(counts, key=lambda user: (-counts[user], user))
 
 
 class AuthorResolver:
@@ -109,24 +107,25 @@ class AuthorResolver:
         self.fetch_spans = fetch_spans
         self.authors = authors
 
-    def resolve(self, resource: object, old: str, new: str) -> Optional[GitAuthor]:
+    def resolve(self, resource: object, old: str, new: str) -> List[GitAuthor]:
+        """Git authors of the change, dominant first. Empty = unattributable."""
         if not self.authors:
-            return None
+            return []
 
         try:
             spans = self.fetch_spans(resource)
         except Exception as e:
             logger.warning(f"Attribution fetch failed for {resource}: {e}")
             logger.debug(traceback.format_exc())
-            return None
+            return []
         if not spans:
-            return None
+            return []
 
-        user = dominant_user(old, new, spans)
-        if user is None:
-            return None
-
-        author = self.authors.get(user)
-        if author is None:
-            logger.info(f"No git author configured for relay user {user}")
-        return author
+        authors = []
+        for user in attributing_users(old, new, spans):
+            author = self.authors.get(user)
+            if author is None:
+                logger.info(f"No git author configured for relay user {user}")
+            elif author not in authors:
+                authors.append(author)
+        return authors
