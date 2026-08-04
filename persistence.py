@@ -16,6 +16,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set
 
 import git
 
+import attribution
 from attribution import AuthorResolver, GitAuthor
 from git_config import GitConnectorConfig, default_git_config_file
 from models import get_s3rn_resource_category
@@ -932,18 +933,28 @@ class PersistenceManager:
                 continue
 
             try:
-                old_content = git_repo.git.show(f"HEAD:{repo_path}")
-            except git.GitCommandError:
-                old_content = ""  # new file
-            try:
                 with open(os.path.join(git_repo.working_dir, repo_path), encoding="utf-8") as f:
                     new_content = f.read()
             except OSError as e:
                 logger.warning(f"Could not read {repo_path} for attribution: {e}")
                 continue
 
+            if repo_path in untracked:
+                changed_ranges = [(0, len(new_content))] if new_content else []
+            else:
+                try:
+                    changed_ranges = attribution.line_ranges_to_char_ranges(
+                        new_content,
+                        attribution.new_side_line_ranges(
+                            git_repo.git.diff("HEAD", "-U0", "--", repo_path)
+                        ),
+                    )
+                except git.GitCommandError as e:
+                    logger.warning(f"Could not diff {repo_path} for attribution: {e}")
+                    continue
+
             authors = self.author_resolver.resolve(
-                S3RemoteDocument(relay_id, folder_id, doc_id), old_content, new_content
+                S3RemoteDocument(relay_id, folder_id, doc_id), new_content, changed_ranges
             )
             if not authors:
                 continue

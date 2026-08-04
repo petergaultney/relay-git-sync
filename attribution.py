@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Resolve the git author for a file change using the relay server's
+"""Resolve the git authors for a file change using the relay server's
 attributed-content endpoint (per-span authorship of the doc's current text).
 
-The dominant author of the *changed* characters gets the commit and any other
+The caller supplies the changed character ranges (computed by git itself -
+see persistence._changed_char_ranges; difflib.SequenceMatcher was tried here
+and is quadratic on large repetitive files, freezing the whole sync process).
+The dominant author of the changed characters gets the commit and any other
 contributors become co-authors; deletion-only changes and unattributable
 content fall back to the default (bot) identity.
 """
 
-import difflib
 import logging
 import re
 import traceback
@@ -47,53 +49,80 @@ def parse_authors(table: Dict[str, str]) -> Dict[str, GitAuthor]:
     return authors
 
 
-def _changed_ranges(old: str, new: str) -> List[Tuple[int, int]]:
-    """Character ranges of `new` that differ from `old` (inserts + replacements)."""
-    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
-    return [
-        (j1, j2)
-        for tag, _i1, _i2, j1, j2 in matcher.get_opcodes()
-        if tag in ("insert", "replace") and j2 > j1
-    ]
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+
+
+def new_side_line_ranges(unified_diff: str) -> List[Tuple[int, int]]:
+    """New-side (line_start, line_end) ranges from unified diff hunk headers.
+
+    0-based half-open; deletion-only hunks (new count 0) are omitted.
+    """
+    ranges = []
+    for match in _HUNK_RE.finditer(unified_diff):
+        start = int(match.group(1)) - 1
+        count = 1 if match.group(2) is None else int(match.group(2))
+        if count > 0:
+            ranges.append((start, start + count))
+    return ranges
+
+
+def line_ranges_to_char_ranges(
+    new: str, line_ranges: List[Tuple[int, int]]
+) -> List[Tuple[int, int]]:
+    """Convert 0-based half-open line ranges into character ranges of `new`."""
+    line_offsets = [0]
+    for line in new.splitlines(keepends=True):
+        line_offsets.append(line_offsets[-1] + len(line))
+
+    def clamp(line: int) -> int:
+        return line_offsets[min(line, len(line_offsets) - 1)]
+
+    return [(clamp(l1), clamp(l2)) for l1, l2 in line_ranges if clamp(l2) > clamp(l1)]
 
 
 def _changed_chars_by_user(
     spans: List[dict], ranges: List[Tuple[int, int]]
 ) -> Dict[Optional[str], int]:
+    """ranges must be sorted and disjoint (unified diff hunks are); O(spans + ranges)."""
     counts: Dict[Optional[str], int] = {}
     offset = 0
+    next_range = 0
     for span in spans:
         span_start, span_end = offset, offset + len(span.get("text", ""))
         offset = span_end
-        overlap = sum(
-            min(span_end, r_end) - max(span_start, r_start)
-            for r_start, r_end in ranges
-            if min(span_end, r_end) > max(span_start, r_start)
-        )
+        while next_range < len(ranges) and ranges[next_range][1] <= span_start:
+            next_range += 1
+        overlap = 0
+        j = next_range
+        while j < len(ranges) and ranges[j][0] < span_end:
+            overlap += min(span_end, ranges[j][1]) - max(span_start, ranges[j][0])
+            j += 1
         if overlap:
             user = span.get("user")
             counts[user] = counts.get(user, 0) + overlap
     return counts
 
 
-def attributing_users(old: str, new: str, spans: List[dict]) -> List[str]:
-    """Relay users who authored the changed characters, most-changed first.
+def attributing_users(
+    new: str, spans: List[dict], changed_ranges: List[Tuple[int, int]]
+) -> List[str]:
+    """Relay users who authored the changed character ranges, most-changed first.
 
-    Empty means "no attributable author": deletion-only change, spans that
-    don't reconstruct `new` (the doc moved on since materialization), or
-    changed content whose authors are all unmapped in PUD.
+    Empty means "no attributable author": no changed ranges, spans that don't
+    reconstruct `new` (the doc moved on since materialization), or changed
+    content whose authors are all unmapped in PUD.
     """
     if "".join(span.get("text", "") for span in spans) != new:
         logger.debug("Attributed spans do not reconstruct file content; skipping attribution")
         return []
 
-    counts = _changed_chars_by_user(spans, _changed_ranges(old, new))
+    counts = _changed_chars_by_user(spans, changed_ranges)
     counts.pop(None, None)
     return sorted(counts, key=lambda user: (-counts[user], user))
 
 
 class AuthorResolver:
-    """Fetches attributed spans for a doc and resolves the change's git author.
+    """Fetches attributed spans for a doc and resolves the change's git authors.
 
     fetch_spans is relay_client.fetch_attributed_spans (or equivalent):
     given an S3RN document resource, return the span list or None.
@@ -107,9 +136,11 @@ class AuthorResolver:
         self.fetch_spans = fetch_spans
         self.authors = authors
 
-    def resolve(self, resource: object, old: str, new: str) -> List[GitAuthor]:
+    def resolve(
+        self, resource: object, new: str, changed_ranges: List[Tuple[int, int]]
+    ) -> List[GitAuthor]:
         """Git authors of the change, dominant first. Empty = unattributable."""
-        if not self.authors:
+        if not self.authors or not changed_ranges:
             return []
 
         try:
@@ -122,7 +153,7 @@ class AuthorResolver:
             return []
 
         authors = []
-        for user in attributing_users(old, new, spans):
+        for user in attributing_users(new, spans, changed_ranges):
             author = self.authors.get(user)
             if author is None:
                 logger.info(f"No git author configured for relay user {user}")
