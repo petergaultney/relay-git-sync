@@ -80,5 +80,5 @@ prefix = ""  # Sync to repository root
 # files) are committed with the default identity as before.
 #
 # [authors]
-# "54z3825vv7thwbi" = "Ada Lovelace <ada@example.com>"
-# "x4gdkngobbsas70" = "Bob Bobson <bob@example.com>"
+# "relay_user_id_1" = "Ada Lovelace <ada@example.com>"
+# "relay_user_id_2" = "Bob Bobson <bob@example.com>"

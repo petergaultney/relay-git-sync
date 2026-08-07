@@ -175,6 +175,11 @@ class PersistenceManager:
         # per author of the changed content (see commit_changes).
         self.author_resolver: Optional[AuthorResolver] = None
         self._deletion_first_seen: Dict[str, float] = {}  # "repo_key:path" -> monotonic time
+        # True while any repo holds deferred (young, unpaired) deletions. The
+        # commit timer must keep calling commit_changes while this is set, even
+        # with no new sync events - otherwise a deferral outlives its pairing
+        # window with no pass left to release it.
+        self.deferred_deletions_pending = False
         self.git_repos: Dict[str, git.Repo] = {}  # Now keyed by "relay_id/folder_id"
         self.git_lock = threading.Lock()  # Prevent concurrent git operations
         # Last fetch time per repo for the unpushed-commit check, keyed by repo_key
@@ -1021,6 +1026,7 @@ class PersistenceManager:
         """
         try:
             committed_any = False
+            any_deferred = False
             # Check each folder repository for changes
             for repo_key, git_repo in self.git_repos.items():
                 if not self._is_repo_key_configured(repo_key):
@@ -1041,6 +1047,7 @@ class PersistenceManager:
                     # default-identity commit for whatever remains (released
                     # deletions, unattributable files, non-markdown).
                     grouped = self._group_changes_by_author(repo_key, git_repo)
+                    any_deferred = any_deferred or bool(grouped.deferred_deletions)
                     for author, bucket in grouped.groups.items():
                         msg = commit_msg
                         co_authors = sorted(bucket.co_authors - {author}, key=lambda a: a.email)
@@ -1082,9 +1089,12 @@ class PersistenceManager:
                     logger.info(f"Pushing previously unpushed commits for repository {repo_key}")
                     self._push_to_remote(repo_key, git_repo)
 
+            self.deferred_deletions_pending = any_deferred
             return committed_any
 
         except Exception as e:
+            # deliberately not clearing deferred_deletions_pending: a failed
+            # pass must not close the timer gate on pending deferrals
             logger.error(f"Error committing to git: {e}")
             logger.error(f"Git commit traceback: {traceback.format_exc()}")
             return False

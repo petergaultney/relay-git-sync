@@ -139,6 +139,10 @@ def run_server(
 
         # Run startup sync for all configured git connectors
         startup_sync_all_folders(sync_engine, persistence_manager)
+        # The startup sync bypasses the operations queue, so nothing sets
+        # has_changes for the work it did (e.g. sweep-deleting local files for
+        # remotely deleted docs). Force one commit pass to pick it up.
+        operations_queue.sync_state.has_changes = True
 
         websocket_listener.start()
 
