@@ -261,3 +261,39 @@ def test_commit_changes_without_resolver_is_single_commit():
         assert not repo.is_dirty(untracked_files=True)
     finally:
         shutil.rmtree(temp_dir)
+
+
+def test_deferred_deletion_sets_pending_flag_until_released(monkeypatch):
+    """A commit of unrelated work must not strand a young unpaired deletion:
+    deferred_deletions_pending stays True until the deferral is released and
+    committed, so the commit timer keeps calling commit_changes."""
+    import persistence as persistence_module
+
+    temp_dir = tempfile.mkdtemp()
+    try:
+        persistence = make_persistence(temp_dir)
+        repo = make_repo(temp_dir)
+        persistence.git_repos = {REPO_KEY: repo}
+        persistence._push_to_remote = MagicMock()
+        persistence._ensure_configured_branch = MagicMock()
+        persistence._pull_from_remote = MagicMock()
+        persistence.local_file_state = {RELAY_ID: {FOLDER_ID: {}}}
+        persistence.author_resolver = AuthorResolver(lambda resource: [], {"user-ada": ADA})
+
+        # a deletion arrives alongside unrelated new work
+        os.remove(os.path.join(repo.working_dir, PREFIX, "existing.md"))
+        write(repo, f"{PREFIX}/unrelated.md", "new note\n")
+
+        # cycle 1: unrelated work commits, deletion is young -> deferred
+        assert persistence.commit_changes() is True
+        assert persistence.deferred_deletions_pending is True
+        assert repo.head.commit.tree[f"{PREFIX}/existing.md"]  # deletion held back
+
+        # cycle 2 (window expired): released to the bot commit, flag clears
+        monkeypatch.setattr(persistence_module, "DELETION_PAIRING_WINDOW_S", 0.0)
+        assert persistence.commit_changes() is True
+        assert persistence.deferred_deletions_pending is False
+        assert f"{PREFIX}/existing.md" not in repo.head.commit.tree
+        assert not repo.is_dirty(untracked_files=True)
+    finally:
+        shutil.rmtree(temp_dir)
