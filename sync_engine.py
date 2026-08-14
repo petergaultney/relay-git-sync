@@ -76,10 +76,19 @@ class SyncEngine:
         timestamp: datetime,
         subdoc_snapshot: Optional[bytes] = None,
         baseline_only: bool = False,
+        user: Optional[str] = None,
     ) -> SyncResult:
-        """Process a document change notification with individual UUIDs"""
+        """Process a document change notification with individual UUIDs.
+
+        `user` is the Relay user whose write produced this notification, when the
+        server reports one. It is the only attribution available for a change that
+        removes content: the removed text is gone from the doc, so no later read
+        of the doc can recover who took it out.
+        """
         try:
             print(f"Processing document change for relay {relay_id}, resource {resource_id}")
+
+            self.persistence_manager.note_doc_writer(resource_id, user)
 
             # Ensure relay data is loaded
             self.persistence_manager.load_persistent_data(relay_id)

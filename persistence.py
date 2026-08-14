@@ -175,6 +175,17 @@ class PersistenceManager:
         # per author of the changed content (see commit_changes).
         self.author_resolver: Optional[AuthorResolver] = None
         self._deletion_first_seen: Dict[str, float] = {}  # "repo_key:path" -> monotonic time
+        # Relay user whose write last touched a doc, doc_id -> user, set from
+        # webhook events and consumed by the next commit pass. Deliberately not
+        # persisted: it describes uncommitted work, so a restart that loses it
+        # should fall back to the default identity rather than attribute stale
+        # edits to whoever wrote before the restart. One small entry per doc
+        # edited since startup, never pruned - single-digit MB at vault scale.
+        self._last_writer: Dict[str, str] = {}
+        # Who deleted a file, "relay_id/folder_id:vault_path" -> user. Captured
+        # when the file is removed, because that is the last moment its path can
+        # still be mapped to a doc_id.
+        self._deleted_by: Dict[str, str] = {}
         # True while any repo holds deferred (young, unpaired) deletions. The
         # commit timer must keep calling commit_changes while this is set, even
         # with no new sync events - otherwise a deferral outlives its pairing
@@ -919,14 +930,22 @@ class PersistenceManager:
     def _group_changes_by_author(self, repo_key: str, git_repo: git.Repo) -> _GroupedChanges:
         """Group this repo's changed markdown files by the dominant author of their changes.
 
-        Files whose author cannot be resolved (no doc mapping, deletion-only
-        change, unmapped user, endpoint unavailable) are simply not grouped and
-        fall through to the default-identity commit. A deletion whose HEAD
-        content byte-matches a new file's content is the old half of a rename;
-        it joins the new path's bucket so git's rename detection can connect
-        the history across the commit. An unpaired deletion younger than
-        DELETION_PAIRING_WINDOW_S is deferred - kept out of every commit -
-        in case its other half hasn't arrived from Relay yet.
+        Files whose author cannot be resolved (no doc mapping, unmapped user,
+        endpoint unavailable) are simply not grouped and fall through to the
+        default-identity commit.
+
+        Removals are attributed from the writer the Relay server reported, not
+        from content: a change that only deletes adds no characters to attribute,
+        and the deleted text is gone from the doc's spans, so nothing about it can
+        be recovered after the fact. Attributing such a change by *authorship of
+        the removed text* would name the victim rather than the actor, which
+        inverts the thing this is for.
+
+        A deletion whose HEAD content byte-matches a new file's content is the old
+        half of a rename; it joins the new path's bucket so git's rename detection
+        can connect the history across the commit. An unpaired deletion younger
+        than DELETION_PAIRING_WINDOW_S is deferred - kept out of every commit - in
+        case its other half hasn't arrived from Relay yet.
         """
         if self.author_resolver is None or not self.author_resolver.authors:
             return _GroupedChanges({}, [])
@@ -975,7 +994,14 @@ class PersistenceManager:
                 S3RemoteDocument(relay_id, folder_id, doc_id), new_content, changed_ranges
             )
             if not authors:
-                continue
+                # No added characters to attribute, so this change only removed
+                # content. The removed text is gone from the doc and its spans,
+                # so the reporting server's writer is the only source left.
+                writer = self._writer_as_author(doc_id)
+                if writer is None:
+                    continue
+
+                authors = [writer]
 
             bucket = groups.setdefault(authors[0], _AuthorBucket([], set()))
             bucket.paths.append(repo_path)
@@ -997,8 +1023,18 @@ class PersistenceManager:
             author = new_content_author.get(hashlib.sha256(content.encode()).hexdigest())
             if author:
                 groups[author].paths.append(deleted)
-            elif time.monotonic() - first_seen < DELETION_PAIRING_WINDOW_S:
+                continue
+
+            if time.monotonic() - first_seen < DELETION_PAIRING_WINDOW_S:
                 deferred.append(deleted)
+                continue
+
+            # Past the pairing window with no matching re-add, so this is a real
+            # removal rather than half of a rename. Attribute it to whoever
+            # deleted the file, recorded when the file was removed.
+            deleter = self._deleted_by.get(f"{repo_key}:/{deleted[len(prefix):]}")
+            if deleter and (author := self.author_resolver.authors.get(deleter)):
+                groups.setdefault(author, _AuthorBucket([], set())).paths.append(deleted)
 
         # forget deletions that are no longer pending (committed or resurrected)
         still_deleted = {f"{repo_key}:{p}" for p in deleted_paths}
@@ -1008,6 +1044,14 @@ class PersistenceManager:
             if k.startswith(f"{repo_key}:") and k not in still_deleted
         ]:
             del self._deletion_first_seen[key]
+
+        still_deleted_vault = {f"{repo_key}:/{p[len(prefix):]}" for p in deleted_paths}
+        for key in [
+            k
+            for k in self._deleted_by
+            if k.startswith(f"{repo_key}:") and k not in still_deleted_vault
+        ]:
+            del self._deleted_by[key]
 
         elapsed = time.monotonic() - started
         if elapsed > 5.0:
@@ -1554,6 +1598,28 @@ class PersistenceManager:
             "modified": time.time(),
         }
 
+    def note_doc_writer(self, doc_id: str, user: Optional[str]):
+        """Record who wrote a doc, for the next commit pass to attribute."""
+        if user:
+            self._last_writer[doc_id] = user
+
+    def doc_writer(self, doc_id: str) -> Optional[str]:
+        return self._last_writer.get(doc_id)
+
+    def _writer_as_author(self, doc_id: str) -> Optional[GitAuthor]:
+        """The configured git author for a doc's last known writer."""
+        if self.author_resolver is None:
+            return None
+
+        user = self.doc_writer(doc_id)
+        if user is None:
+            return None
+
+        author = self.author_resolver.authors.get(user)
+        if author is None:
+            logger.info(f"No git author configured for relay user {user}")
+        return author
+
     def remove_local_file_state(self, relay_id: str, folder_id: str, path: str):
         """Remove local file state tracking"""
         if relay_id in self.local_file_state:
@@ -1688,6 +1754,17 @@ class PersistenceManager:
         full_path = self._sanitize_path(path, folder_path)
 
         if os.path.exists(full_path):
+            # The state entry is about to go, and with it the only mapping from
+            # this path to its doc. Carry the doc's writer over to the path now so
+            # the commit pass can still attribute the removal.
+            doc_id = (
+                self.local_file_state.get(relay_id, {}).get(folder_uuid, {}).get(path) or {}
+            ).get("doc_id")
+            if doc_id:
+                writer = self.doc_writer(doc_id)
+                if writer:
+                    self._deleted_by[f"{relay_id}/{folder_uuid}:{path}"] = writer
+
             os.remove(full_path)
 
             # Remove from local state using folder_uuid for state tracking

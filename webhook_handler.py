@@ -48,6 +48,9 @@ class WebhookProcessor:
                 "relay_id": relay_id,
                 "resource_id": document_id,  # Individual UUID, not compound ID
                 "timestamp": timestamp_dt,
+                # The user whose write produced this event. Absent from servers
+                # that don't report it, and for the server's own writes.
+                "user": payload.get("user"),
             }
 
         except Exception as e:

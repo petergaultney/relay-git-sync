@@ -47,6 +47,11 @@ class OperationsQueue:
             if "subdoc_snapshot" in existing and "subdoc_snapshot" not in change_data:
                 merged["subdoc_snapshot"] = existing["subdoc_snapshot"]
                 merged["baseline_only"] = existing.get("baseline_only", False)
+            # Coalescing must not discard a named writer in favour of an
+            # unattributed one: the server's own writes report no user, and they
+            # would otherwise erase the user who actually edited the doc.
+            if change_data.get("user") is None and existing.get("user") is not None:
+                merged["user"] = existing["user"]
             self._document_changes[key] = merged
 
         if already_queued:
@@ -90,6 +95,7 @@ class OperationsQueue:
                                 change_data["timestamp"],
                                 subdoc_snapshot=change_data.get("subdoc_snapshot"),
                                 baseline_only=change_data.get("baseline_only", False),
+                                user=change_data.get("user"),
                             )
                     else:
                         logger.warning(f"Unknown request type: {type(request)}")
