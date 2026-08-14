@@ -77,18 +77,20 @@ class SyncEngine:
         subdoc_snapshot: Optional[bytes] = None,
         baseline_only: bool = False,
         user: Optional[str] = None,
+        deleted_from: Optional[List[Tuple[str, int]]] = None,
     ) -> SyncResult:
         """Process a document change notification with individual UUIDs.
 
-        `user` is the Relay user whose write produced this notification, when the
-        server reports one. It is the only attribution available for a change that
-        removes content: the removed text is gone from the doc, so no later read
-        of the doc can recover who took it out.
+        `user` is the Relay user whose write produced this notification, and
+        `deleted_from` ranks the users whose content that write removed. They are
+        the only attribution available for a change that removes content: the
+        removed text is gone from the doc, so no later read of the doc can
+        recover who took it out or whose it was.
         """
         try:
             print(f"Processing document change for relay {relay_id}, resource {resource_id}")
 
-            self.persistence_manager.note_doc_writer(resource_id, user)
+            self.persistence_manager.note_doc_writer(resource_id, user, deleted_from)
 
             # Ensure relay data is loaded
             self.persistence_manager.load_persistent_data(relay_id)

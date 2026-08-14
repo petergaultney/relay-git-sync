@@ -182,3 +182,84 @@ def test_whole_file_deletion_is_attributed_to_the_deleter():
         assert f"{PREFIX}/frontmatter.md" not in repo.head.commit.tree
     finally:
         shutil.rmtree(temp_dir)
+
+
+def messages_of(repo):
+    return {c.author.email: c.message for c in list(repo.iter_commits("main"))[:-1]}
+
+
+def test_commit_names_whose_content_was_deleted():
+    """git blame cannot answer this: the removed line is absent from the file,
+    so it has no blame entry at all."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        persistence, repo = setup(
+            temp_dir, [{"text": TEAM_LIST_TRIMMED, "client_id": 1, "user": "user-ada"}]
+        )
+        persistence.note_doc_writer("doc-1", "user-bob", [("user-ada", 20)])
+
+        with open(os.path.join(repo.working_dir, PREFIX, "frontmatter.md"), "w") as f:
+            f.write(TEAM_LIST_TRIMMED)
+
+        assert persistence.commit_changes() is True
+        message = messages_of(repo)[BOB.email]
+        assert f"Deleted-content-of: {ADA.name} <{ADA.email}>" in message
+        # not Co-authored-by - Ada did not help write this commit
+        assert "Co-authored-by" not in message
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_deleting_your_own_content_names_no_victim():
+    temp_dir = tempfile.mkdtemp()
+    try:
+        persistence, repo = setup(
+            temp_dir, [{"text": TEAM_LIST_TRIMMED, "client_id": 1, "user": "user-bob"}]
+        )
+        persistence.note_doc_writer("doc-1", "user-bob", [("user-bob", 20)])
+
+        with open(os.path.join(repo.working_dir, PREFIX, "frontmatter.md"), "w") as f:
+            f.write(TEAM_LIST_TRIMMED)
+
+        assert persistence.commit_changes() is True
+        assert "Deleted-content-of" not in messages_of(repo)[BOB.email]
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_a_line_with_multiple_editors_names_each_victim():
+    """The multi-editor case: one removal can take several people's work."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        persistence, repo = setup(
+            temp_dir, [{"text": TEAM_LIST_TRIMMED, "client_id": 1, "user": "user-ada"}]
+        )
+        # server ranks victims by how much went; ada lost more than the bot user
+        persistence.note_doc_writer("doc-1", "user-bob", [("user-ada", 18), ("user-carol", 4)])
+
+        with open(os.path.join(repo.working_dir, PREFIX, "frontmatter.md"), "w") as f:
+            f.write(TEAM_LIST_TRIMMED)
+
+        assert persistence.commit_changes() is True
+        message = messages_of(repo)[BOB.email]
+        # user-carol has no configured git author, so only ada can be named
+        assert f"Deleted-content-of: {ADA.name} <{ADA.email}>" in message
+        assert message.count("Deleted-content-of") == 1
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_whole_file_deletion_names_the_victim():
+    temp_dir = tempfile.mkdtemp()
+    try:
+        persistence, repo = setup(temp_dir, [])
+        os.remove(os.path.join(repo.working_dir, PREFIX, "frontmatter.md"))
+        persistence._deleted_by[f"{REPO_KEY}:/frontmatter.md"] = "user-bob"
+        persistence._deleted_victims[f"{REPO_KEY}:/frontmatter.md"] = ["user-ada"]
+        persistence._deletion_first_seen[f"{REPO_KEY}:{PREFIX}/frontmatter.md"] = 0.0
+
+        assert persistence.commit_changes() is True
+        message = messages_of(repo)[BOB.email]
+        assert f"Deleted-content-of: {ADA.name} <{ADA.email}>" in message
+    finally:
+        shutil.rmtree(temp_dir)

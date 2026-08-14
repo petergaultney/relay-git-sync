@@ -51,6 +51,9 @@ class WebhookProcessor:
                 # The user whose write produced this event. Absent from servers
                 # that don't report it, and for the server's own writes.
                 "user": payload.get("user"),
+                # [[user, clock_units], ...] for whoever's content this write
+                # removed, most removed first. Absent when nothing was deleted.
+                "deleted_from": payload.get("deleted_from") or [],
             }
 
         except Exception as e:

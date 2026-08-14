@@ -52,6 +52,10 @@ class OperationsQueue:
             # would otherwise erase the user who actually edited the doc.
             if change_data.get("user") is None and existing.get("user") is not None:
                 merged["user"] = existing["user"]
+            # Likewise the victims: a later additive write reports none, and must
+            # not erase the deletion that a coalesced earlier one recorded.
+            if not change_data.get("deleted_from") and existing.get("deleted_from"):
+                merged["deleted_from"] = existing["deleted_from"]
             self._document_changes[key] = merged
 
         if already_queued:
@@ -96,6 +100,7 @@ class OperationsQueue:
                                 subdoc_snapshot=change_data.get("subdoc_snapshot"),
                                 baseline_only=change_data.get("baseline_only", False),
                                 user=change_data.get("user"),
+                                deleted_from=change_data.get("deleted_from"),
                             )
                     else:
                         logger.warning(f"Unknown request type: {type(request)}")

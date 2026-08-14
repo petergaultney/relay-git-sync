@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 import traceback
-from typing import Any, Dict, List, NamedTuple, Optional, Set
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import git
 
@@ -34,10 +34,12 @@ logger = logging.getLogger(__name__)
 
 
 class _AuthorBucket(NamedTuple):
-    """One pending commit: the dominant author's files plus any co-authors."""
+    """One pending commit: the dominant author's files, any co-authors, and
+    anyone whose content this commit removed."""
 
     paths: List[str]
     co_authors: Set[GitAuthor]
+    deleted_from: List[GitAuthor]
 
 
 class _GroupedChanges(NamedTuple):
@@ -186,6 +188,12 @@ class PersistenceManager:
         # when the file is removed, because that is the last moment its path can
         # still be mapped to a doc_id.
         self._deleted_by: Dict[str, str] = {}
+        # Users whose content was removed from a doc, doc_id -> users ranked by
+        # how much went. Same lifetime as _last_writer.
+        self._deleted_content_of: Dict[str, List[str]] = {}
+        # The same, carried onto the path when a whole file goes, since the
+        # doc_id mapping does not survive the delete.
+        self._deleted_victims: Dict[str, List[str]] = {}
         # True while any repo holds deferred (young, unpaired) deletions. The
         # commit timer must keep calling commit_changes while this is set, even
         # with no new sync events - otherwise a deferral outlives its pairing
@@ -1003,9 +1011,12 @@ class PersistenceManager:
 
                 authors = [writer]
 
-            bucket = groups.setdefault(authors[0], _AuthorBucket([], set()))
+            bucket = groups.setdefault(authors[0], _AuthorBucket([], set(), []))
             bucket.paths.append(repo_path)
             bucket.co_authors.update(authors[1:])
+            for victim in self._victims_as_authors(doc_id, authors[0]):
+                if victim not in bucket.deleted_from:
+                    bucket.deleted_from.append(victim)
             if repo_path in untracked:
                 new_content_author[hashlib.sha256(new_content.encode()).hexdigest()] = authors[0]
 
@@ -1032,9 +1043,15 @@ class PersistenceManager:
             # Past the pairing window with no matching re-add, so this is a real
             # removal rather than half of a rename. Attribute it to whoever
             # deleted the file, recorded when the file was removed.
-            deleter = self._deleted_by.get(f"{repo_key}:/{deleted[len(prefix):]}")
+            vault_path = f"{repo_key}:/{deleted[len(prefix):]}"
+            deleter = self._deleted_by.get(vault_path)
             if deleter and (author := self.author_resolver.authors.get(deleter)):
-                groups.setdefault(author, _AuthorBucket([], set())).paths.append(deleted)
+                bucket = groups.setdefault(author, _AuthorBucket([], set(), []))
+                bucket.paths.append(deleted)
+                for user in self._deleted_victims.get(vault_path, []):
+                    victim = self.author_resolver.authors.get(user)
+                    if victim is not None and victim != author and victim not in bucket.deleted_from:
+                        bucket.deleted_from.append(victim)
 
         # forget deletions that are no longer pending (committed or resurrected)
         still_deleted = {f"{repo_key}:{p}" for p in deleted_paths}
@@ -1046,12 +1063,13 @@ class PersistenceManager:
             del self._deletion_first_seen[key]
 
         still_deleted_vault = {f"{repo_key}:/{p[len(prefix):]}" for p in deleted_paths}
-        for key in [
-            k
-            for k in self._deleted_by
-            if k.startswith(f"{repo_key}:") and k not in still_deleted_vault
-        ]:
-            del self._deleted_by[key]
+        for tracked in (self._deleted_by, self._deleted_victims):
+            for key in [
+                k
+                for k in tracked
+                if k.startswith(f"{repo_key}:") and k not in still_deleted_vault
+            ]:
+                del tracked[key]
 
         elapsed = time.monotonic() - started
         if elapsed > 5.0:
@@ -1095,10 +1113,16 @@ class PersistenceManager:
                     for author, bucket in grouped.groups.items():
                         msg = commit_msg
                         co_authors = sorted(bucket.co_authors - {author}, key=lambda a: a.email)
-                        if co_authors:
-                            msg += "\n\n" + "\n".join(
-                                f"Co-authored-by: {a.name} <{a.email}>" for a in co_authors
-                            )
+                        trailers = [
+                            f"Co-authored-by: {a.name} <{a.email}>" for a in co_authors
+                        ] + [
+                            # Not Co-authored-by: the person whose content was
+                            # removed did not help write this commit.
+                            f"Deleted-content-of: {a.name} <{a.email}>"
+                            for a in bucket.deleted_from
+                        ]
+                        if trailers:
+                            msg += "\n\n" + "\n".join(trailers)
                         self._safe_git_operation(lambda: git_repo.git.add("--", *bucket.paths))
                         self._safe_git_operation(
                             lambda: git_repo.index.commit(
@@ -1598,13 +1622,36 @@ class PersistenceManager:
             "modified": time.time(),
         }
 
-    def note_doc_writer(self, doc_id: str, user: Optional[str]):
-        """Record who wrote a doc, for the next commit pass to attribute."""
+    def note_doc_writer(
+        self,
+        doc_id: str,
+        user: Optional[str],
+        deleted_from: Optional[List[Tuple[str, int]]] = None,
+    ):
+        """Record who wrote a doc and whose content they removed, for the next
+        commit pass to attribute."""
         if user:
             self._last_writer[doc_id] = user
+        if deleted_from:
+            self._deleted_content_of[doc_id] = [user for user, _span in deleted_from]
 
     def doc_writer(self, doc_id: str) -> Optional[str]:
         return self._last_writer.get(doc_id)
+
+    def _victims_as_authors(self, doc_id: str, actor: GitAuthor) -> List[GitAuthor]:
+        """Configured git authors whose content was removed from a doc, ranked.
+
+        The actor is excluded: removing your own text names no victim.
+        """
+        if self.author_resolver is None:
+            return []
+
+        victims = []
+        for user in self._deleted_content_of.get(doc_id, []):
+            author = self.author_resolver.authors.get(user)
+            if author is not None and author != actor and author not in victims:
+                victims.append(author)
+        return victims
 
     def _writer_as_author(self, doc_id: str) -> Optional[GitAuthor]:
         """The configured git author for a doc's last known writer."""
@@ -1764,6 +1811,9 @@ class PersistenceManager:
                 writer = self.doc_writer(doc_id)
                 if writer:
                     self._deleted_by[f"{relay_id}/{folder_uuid}:{path}"] = writer
+                victims = self._deleted_content_of.get(doc_id)
+                if victims:
+                    self._deleted_victims[f"{relay_id}/{folder_uuid}:{path}"] = victims
 
             os.remove(full_path)
 
