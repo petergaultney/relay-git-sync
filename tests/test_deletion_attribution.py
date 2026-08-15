@@ -23,6 +23,7 @@ PREFIX = "notes"
 
 ADA = GitAuthor("Ada Lovelace", "ada@example.com")
 BOB = GitAuthor("Bob Bobson", "bob@example.com")
+CAROL = GitAuthor("Carol Carolson", "carol@example.com")
 
 TEAM_LIST = "Team Members:\n  - Hillary Cansler\n  - Chris Hebert\n"
 TEAM_LIST_TRIMMED = "Team Members:\n  - Chris Hebert\n"
@@ -261,5 +262,34 @@ def test_whole_file_deletion_names_the_victim():
         assert persistence.commit_changes() is True
         message = messages_of(repo)[BOB.email]
         assert f"Deleted-content-of: {ADA.name} <{ADA.email}>" in message
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_deleting_several_peoples_content_names_them_all():
+    """One removal can take several people's work - a paragraph they co-wrote,
+    or a block someone edited after someone else. Every victim gets a trailer,
+    ranked by how much of theirs went."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        persistence, repo = setup(
+            temp_dir, [{"text": TEAM_LIST_TRIMMED, "client_id": 1, "user": "user-ada"}]
+        )
+        # bob deletes content belonging to both ada and carol
+        persistence.author_resolver.authors["user-carol"] = CAROL
+        persistence.note_doc_writer(
+            "doc-1", "user-bob", [("user-ada", 40), ("user-carol", 12)]
+        )
+
+        with open(os.path.join(repo.working_dir, PREFIX, "frontmatter.md"), "w") as f:
+            f.write(TEAM_LIST_TRIMMED)
+
+        assert persistence.commit_changes() is True
+        message = messages_of(repo)[BOB.email]
+        trailers = [l for l in message.splitlines() if l.startswith("Deleted-content-of:")]
+        assert trailers == [
+            f"Deleted-content-of: {ADA.name} <{ADA.email}>",
+            f"Deleted-content-of: {CAROL.name} <{CAROL.email}>",
+        ], "both victims, most-deleted first"
     finally:
         shutil.rmtree(temp_dir)
