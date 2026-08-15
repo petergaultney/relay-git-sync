@@ -59,3 +59,30 @@ class TestWebhookProcessor:
         )
 
         assert result is None
+
+
+def test_deleter_comes_from_writer_not_user():
+    """`user` names whoever caused the doc to load and is reported unchanged for
+    that doc's lifetime; only `writer` names who made this particular write."""
+    from unittest.mock import MagicMock
+
+    from webhook_handler import WebhookProcessor
+
+    relay_client = MagicMock()
+    relay_client.extract_relay_id.return_value = "relay-1"
+    relay_client.extract_document_id.return_value = "doc-1"
+
+    result = WebhookProcessor(relay_client).process_webhook(
+        {
+            "payload": {
+                "doc_id": "relay-1-doc-1",
+                "timestamp": "2026-08-14T22:11:57Z",
+                "user": "whoever-opened-the-doc",
+                "writer": "the-actual-deleter",
+                "deleted_from": [["the-victim", 20]],
+            }
+        }
+    )
+
+    assert result["user"] == "the-actual-deleter"
+    assert result["deleted_from"] == [["the-victim", 20]]

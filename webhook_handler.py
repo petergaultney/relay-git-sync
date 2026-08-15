@@ -48,9 +48,11 @@ class WebhookProcessor:
                 "relay_id": relay_id,
                 "resource_id": document_id,  # Individual UUID, not compound ID
                 "timestamp": timestamp_dt,
-                # The user whose write produced this event. Absent from servers
-                # that don't report it, and for the server's own writes.
-                "user": payload.get("user"),
+                # The connection that applied this write. Absent from servers
+                # that don't report it, and for the server's own writes. Not
+                # payload["user"], which names whoever caused the doc to load
+                # and is reported unchanged for that doc's whole lifetime.
+                "user": payload.get("writer"),
                 # [[user, clock_units], ...] for whoever's content this write
                 # removed, most removed first. Absent when nothing was deleted.
                 "deleted_from": payload.get("deleted_from") or [],
