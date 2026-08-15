@@ -184,3 +184,55 @@ def test_persisted_subdoc_head_skips_unchanged_reconnect_snapshot():
     )
 
     queue.enqueue_document_change.assert_not_called()
+
+
+def test_event_carries_the_writer_and_deleted_from_to_the_queue():
+    """This is the live path - git-sync learns about changes over the websocket
+    subscription, not webhooks - so attribution has to survive this hop."""
+    listener, queue, _persistence = make_listener()
+
+    listener._handle_message(
+        RELAY_ID,
+        FOLDER_ID,
+        {
+            "type": "event",
+            "data": {
+                "event_type": "document.updated",
+                "doc_id": f"{RELAY_ID}-{DOC_ID}",
+                "timestamp": 1_719_000_000_123,
+                "user": "whoever-opened-the-doc",
+                "writer": "the-actual-deleter",
+                "deleted_from": [["the-victim", 20]],
+            },
+        },
+        subscription=SimpleNamespace(query=Mock()),
+    )
+
+    change = queue.enqueue_document_change.call_args.args[0]
+    assert change["user"] == "the-actual-deleter"
+    assert change["deleted_from"] == [["the-victim", 20]]
+
+
+def test_event_from_a_server_without_attribution_is_unattributed():
+    """An older server sends neither field; we must not fall back to `user`,
+    which names whoever opened the doc rather than who made this change."""
+    listener, queue, _persistence = make_listener()
+
+    listener._handle_message(
+        RELAY_ID,
+        FOLDER_ID,
+        {
+            "type": "event",
+            "data": {
+                "event_type": "document.updated",
+                "doc_id": f"{RELAY_ID}-{DOC_ID}",
+                "timestamp": 1_719_000_000_123,
+                "user": "whoever-opened-the-doc",
+            },
+        },
+        subscription=SimpleNamespace(query=Mock()),
+    )
+
+    change = queue.enqueue_document_change.call_args.args[0]
+    assert change["user"] is None
+    assert change["deleted_from"] == []

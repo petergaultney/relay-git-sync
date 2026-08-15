@@ -135,10 +135,19 @@ class WebsocketChangeListener:
             doc_id = event.get("doc_id")
             timestamp = self._event_timestamp(event)
 
+            # Who applied this update, and whose content it removed. Absent from
+            # servers that predate them, and from updates that deleted nothing.
+            # Not event["user"], which names whoever caused the doc to load and
+            # is then repeated for that doc's whole lifetime.
+            attribution = {
+                "user": event.get("writer"),
+                "deleted_from": event.get("deleted_from") or [],
+            }
+
             if doc_id:
-                self._enqueue_doc_id(relay_id, folder_id, doc_id, timestamp)
+                self._enqueue_doc_id(relay_id, folder_id, doc_id, timestamp, **attribution)
             else:
-                self._enqueue_change(relay_id, folder_id, timestamp)
+                self._enqueue_change(relay_id, folder_id, timestamp, **attribution)
 
         elif message_type == "subdocs":
             for snapshot in message.get("snapshots", {}).values():
